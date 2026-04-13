@@ -13,10 +13,7 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use('/uploads', express.static('uploads')); // Rasmlarni saqlash uchun
 
-mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/smart-attendance', {
-    useNewUrlParser: true,
-    useUnifiedTopology: true
-})
+mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/smart-attendance')
 .then(() => console.log("MongoDB muvaffaqiyatli ulandi"))
 .catch((err) => console.error("MongoDB ulanishida xato:", err));
 
