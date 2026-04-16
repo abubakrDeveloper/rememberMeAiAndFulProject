@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+outputs/alerts/*.jpg
+outputs/alerts/*.png
+outputs/logs/events.csv
+data/registry/*.npz
+data/registry/*.json
