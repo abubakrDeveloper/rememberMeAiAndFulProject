@@ -1,5 +1,4 @@
 import argparse
-import csv
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -7,6 +6,7 @@ from pathlib import Path
 import cv2
 
 from app.config import DemoConfig
+from app.events import append_event_row, ensure_events_csv
 from app.sample_scene import create_sample_frame
 
 
@@ -18,49 +18,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alerts-dir", type=Path, default=defaults.alerts_dir)
     parser.add_argument("--rows", type=int, default=45)
     parser.add_argument("--source", default="sample")
+    parser.add_argument("--course-id", default="general")
+    parser.add_argument("--session-id", default="session_1")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
-
-
-def write_csv_header_if_needed(path: Path) -> None:
-    if path.exists():
-        return
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=[
-                "timestamp",
-                "event_type",
-                "track_id",
-                "identity",
-                "confidence",
-                "attention_state",
-                "source",
-                "snapshot_path",
-            ],
-        )
-        writer.writeheader()
-
-
-def append_row(path: Path, row: dict) -> None:
-    with path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=[
-                "timestamp",
-                "event_type",
-                "track_id",
-                "identity",
-                "confidence",
-                "attention_state",
-                "source",
-                "snapshot_path",
-            ],
-        )
-        writer.writerow(row)
 
 
 def save_unknown_snapshot(alerts_dir: Path, frame_index: int) -> str:
@@ -87,7 +49,7 @@ def main() -> None:
     if args.overwrite and args.events_csv.exists():
         args.events_csv.unlink()
 
-    write_csv_header_if_needed(args.events_csv)
+    ensure_events_csv(args.events_csv)
 
     student_pool = ["student_001", "student_002", "student_003", "student_004"]
     attention_states = ["attentive", "attentive", "attentive", "distracted", "sleeping"]
@@ -108,6 +70,9 @@ def main() -> None:
                 "identity": "unknown",
                 "confidence": f"{random.uniform(0.20, 0.44):.4f}",
                 "attention_state": "distracted",
+                "reason": "outsider",
+                "course_id": args.course_id,
+                "session_id": args.session_id,
                 "source": args.source,
                 "snapshot_path": snapshot,
             }
@@ -121,6 +86,9 @@ def main() -> None:
                 "identity": student,
                 "confidence": f"{random.uniform(0.62, 0.98):.4f}",
                 "attention_state": att,
+                "reason": att,
+                "course_id": args.course_id,
+                "session_id": args.session_id,
                 "source": args.source,
                 "snapshot_path": "",
             }
@@ -134,11 +102,14 @@ def main() -> None:
                 "identity": student,
                 "confidence": f"{random.uniform(0.62, 0.98):.4f}",
                 "attention_state": att,
+                "reason": "",
+                "course_id": args.course_id,
+                "session_id": args.session_id,
                 "source": args.source,
                 "snapshot_path": "",
             }
 
-        append_row(args.events_csv, row)
+        append_event_row(args.events_csv, row)
 
     print(f"Fake data generated: {args.events_csv}")
     print(f"Alert snapshots directory: {args.alerts_dir}")

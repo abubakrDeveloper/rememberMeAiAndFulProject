@@ -2,6 +2,8 @@ param(
     [ValidateSet("sample", "camera", "video")]
     [string]$Mode = "sample",
     [string]$Source = "0",
+    [string]$CourseId = "general",
+    [string]$SessionId = "session_1",
     [switch]$ShowPreview,
     [switch]$SeedFakeData,
     [switch]$SaveOutput,
@@ -14,19 +16,29 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
 
-$pythonExe = Join-Path $projectRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path $pythonExe)) {
-    Write-Host "Python virtual environment not found at .venv\Scripts\python.exe"
-    Write-Host "Create it first: python -m venv .venv; .\.venv\Scripts\Activate.ps1; pip install -r requirements.txt"
+$venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
+if (Test-Path $venvPython) {
+    $pythonExe = $venvPython
+}
+elseif (Get-Command python -ErrorAction SilentlyContinue) {
+    $pythonExe = (Get-Command python).Source
+}
+elseif (Get-Command py -ErrorAction SilentlyContinue) {
+    $pythonExe = (Get-Command py).Source
+}
+else {
+    Write-Host "Python was not found. Install Python 3.11+ and run: python -m pip install -r requirements.txt"
     exit 1
 }
+
+Write-Host "Using Python executable: $pythonExe"
 
 New-Item -ItemType Directory -Path "outputs\logs" -Force | Out-Null
 New-Item -ItemType Directory -Path "outputs\alerts" -Force | Out-Null
 New-Item -ItemType Directory -Path "outputs\video" -Force | Out-Null
 
 if ($SeedFakeData) {
-    & $pythonExe -m app.generate_fake_data --overwrite --rows 28
+    & $pythonExe -m app.generate_fake_data --overwrite --rows 28 --course-id $CourseId --session-id $SessionId
 }
 
 if ($Mode -eq "sample") {
@@ -40,6 +52,7 @@ elseif ($Mode -eq "video") {
 }
 
 $recognitionArgs = @("-m", "app.recognition", "--source", $Source)
+$recognitionArgs += @("--course-id", $CourseId, "--session-id", $SessionId)
 
 if ($Mode -eq "sample") {
     $recognitionArgs += "--sample-mode"

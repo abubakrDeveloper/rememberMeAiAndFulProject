@@ -1,5 +1,4 @@
 import argparse
-import csv
 import json
 import smtplib
 import ssl
@@ -18,6 +17,7 @@ from ultralytics import YOLO
 
 from app.attention import AttentionThresholds, classify_attention, get_ear, get_head_pose
 from app.config import DemoConfig
+from app.events import append_event_row
 from app.face_registry import find_best_match, l2_normalize, load_registry
 from app.preprocessing import compute_upscale_factor, enhance_for_cctv, enhance_roi
 from app.sample_scene import SampleTrack, create_sample_frame
@@ -37,6 +37,12 @@ class TrackState:
     last_attention_log: datetime = field(default_factory=lambda: datetime.min)
 
 
+EVENT_CONTEXT: dict[str, str] = {
+    "course_id": "general",
+    "session_id": "session_1",
+}
+
+
 def is_sample_mode(args: argparse.Namespace) -> bool:
     return args.sample_mode or args.source.strip().lower() == "sample"
 
@@ -52,25 +58,9 @@ def build_face_analyzer(model_name: str, det_width: int, det_height: int) -> Fac
 
 
 def append_event(csv_path: Path, row: dict) -> None:
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    file_exists = csv_path.exists()
-
-    with csv_path.open("a", newline="", encoding="utf-8") as handle:
-        fieldnames = [
-            "timestamp",
-            "event_type",
-            "track_id",
-            "identity",
-            "confidence",
-            "attention_state",
-            "reason",
-            "source",
-            "snapshot_path",
-        ]
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
+    row.setdefault("course_id", EVENT_CONTEXT.get("course_id", "general"))
+    row.setdefault("session_id", EVENT_CONTEXT.get("session_id", "session_1"))
+    append_event_row(csv_path, row)
 
 
 def iou(box_a: tuple[int, int, int, int], box_b: tuple[int, int, int, int]) -> float:
@@ -832,6 +822,8 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description="Run live recognition and outsider alerts.")
     parser.add_argument("--source", default="0", help="Camera index like 0 or video path")
+    parser.add_argument("--course-id", default="general", help="Course identifier for attendance")
+    parser.add_argument("--session-id", default="session_1", help="Session identifier for attendance")
     parser.add_argument("--sample-mode", action="store_true", help="Run synthetic no-camera demo mode")
     parser.add_argument("--offline", action="store_true", help="Process a video file offline (no preview window)")
     parser.add_argument("--registry", type=Path, default=defaults.registry_file)
@@ -894,6 +886,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    EVENT_CONTEXT["course_id"] = str(args.course_id).strip() or "general"
+    EVENT_CONTEXT["session_id"] = str(args.session_id).strip() or "session_1"
     if args.disable_phone_detection:
         args.enable_phone_detection = False
     if is_sample_mode(args):
