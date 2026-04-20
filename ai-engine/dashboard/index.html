@@ -1,0 +1,881 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Classroom Admin Dashboard</title>
+    <style>
+      :root {
+        --bg: #f4efe5;
+        --panel: #fffaf2;
+        --ink: #1e2a2f;
+        --muted: #5d6b71;
+        --accent: #005f73;
+        --accent-2: #ca6702;
+        --ok: #2a9d8f;
+        --warn: #e9c46a;
+        --danger: #bb3e03;
+        --line: #d8cdc0;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 12% 18%, #fef5d8 0%, rgba(254, 245, 216, 0) 35%),
+          radial-gradient(circle at 88% 6%, #e7f4f3 0%, rgba(231, 244, 243, 0) 32%),
+          var(--bg);
+      }
+
+      .wrap {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+
+      .top {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 14px;
+        align-items: center;
+        margin-bottom: 14px;
+      }
+
+      .title h1 {
+        margin: 0;
+        font-size: clamp(1.35rem, 2.3vw, 2rem);
+        letter-spacing: 0.3px;
+      }
+
+      .title p {
+        margin: 6px 0 0;
+        color: var(--muted);
+      }
+
+      .controls {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 8px 12px;
+        color: var(--muted);
+        user-select: none;
+      }
+
+      button {
+        border: 0;
+        padding: 10px 14px;
+        border-radius: 12px;
+        background: var(--accent);
+        color: #ffffff;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .filters {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(140px, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      .filters .field {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        padding: 8px;
+      }
+
+      .filters label {
+        display: block;
+        font-size: 0.72rem;
+        color: var(--muted);
+        margin-bottom: 4px;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+
+      .filters input,
+      .filters select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #ffffff;
+        padding: 7px 8px;
+        font-size: 0.88rem;
+        color: var(--ink);
+      }
+
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(8, minmax(120px, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        border-radius: 14px;
+        padding: 11px;
+        min-height: 82px;
+      }
+
+      .card .k {
+        color: var(--muted);
+        font-size: 0.77rem;
+        margin-bottom: 6px;
+      }
+
+      .card .v {
+        font-size: 1.35rem;
+        font-weight: 700;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 1.3fr 1fr;
+        gap: 14px;
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        border-radius: 14px;
+        padding: 12px;
+      }
+
+      .panel h2 {
+        margin: 2px 0 10px;
+        font-size: 1.05rem;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.86rem;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 8px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+
+      th {
+        font-size: 0.76rem;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .status,
+      .band,
+      .health {
+        font-weight: 700;
+        border-radius: 999px;
+        font-size: 0.73rem;
+        padding: 3px 8px;
+        display: inline-block;
+      }
+
+      .status.present {
+        background: #ddf2ee;
+        color: #1b5f56;
+      }
+
+      .status.absent {
+        background: #ffe5db;
+        color: #883616;
+      }
+
+      .band.low {
+        background: #ffe5db;
+        color: #883616;
+      }
+
+      .band.medium {
+        background: #fff2cf;
+        color: #8b5e00;
+      }
+
+      .band.high {
+        background: #ddf2ee;
+        color: #1b5f56;
+      }
+
+      .health.online {
+        background: #ddf2ee;
+        color: #1b5f56;
+      }
+
+      .health.offline {
+        background: #ffe5db;
+        color: #883616;
+      }
+
+      .bars {
+        display: grid;
+        gap: 8px;
+      }
+
+      .bar {
+        display: grid;
+        grid-template-columns: 150px 1fr 42px;
+        gap: 9px;
+        align-items: center;
+      }
+
+      .bar-track {
+        height: 12px;
+        background: #efe5d8;
+        border-radius: 999px;
+        overflow: hidden;
+      }
+
+      .bar-fill {
+        height: 100%;
+        background: var(--accent-2);
+        width: 0%;
+        transition: width 0.35s ease;
+      }
+
+      .meta-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .pill {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 4px 9px;
+        font-size: 0.75rem;
+        color: var(--muted);
+      }
+
+      .gallery {
+        margin-top: 12px;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+        gap: 10px;
+      }
+
+      .shot {
+        border: 1px solid var(--line);
+        background: #fff;
+        border-radius: 12px;
+        overflow: hidden;
+      }
+
+      .shot img {
+        width: 100%;
+        height: 130px;
+        object-fit: cover;
+        display: block;
+      }
+
+      .shot .meta {
+        padding: 8px;
+        font-size: 0.78rem;
+      }
+
+      .empty {
+        color: var(--muted);
+        font-style: italic;
+        padding: 10px 0;
+      }
+
+      @media (max-width: 1100px) {
+        .filters {
+          grid-template-columns: repeat(3, minmax(140px, 1fr));
+        }
+
+        .cards {
+          grid-template-columns: repeat(4, minmax(120px, 1fr));
+        }
+
+        .layout {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 760px) {
+        .top {
+          grid-template-columns: 1fr;
+        }
+
+        .filters {
+          grid-template-columns: repeat(2, minmax(130px, 1fr));
+        }
+
+        .cards {
+          grid-template-columns: repeat(2, minmax(120px, 1fr));
+        }
+
+        .split {
+          grid-template-columns: 1fr;
+        }
+
+        .bar {
+          grid-template-columns: 105px 1fr 35px;
+          font-size: 0.82rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="top">
+        <div class="title">
+          <h1>School CCTV Admin Dashboard</h1>
+          <p id="statusText">Waiting for report files...</p>
+        </div>
+        <div class="controls">
+          <label class="switch">
+            <input type="checkbox" id="autoRefresh" checked /> Auto refresh
+          </label>
+          <button id="refreshBtn" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <section class="filters">
+        <div class="field">
+          <label for="dateFilter">Date</label>
+          <input id="dateFilter" type="date" />
+        </div>
+        <div class="field">
+          <label for="classFilter">Class</label>
+          <select id="classFilter">
+            <option value="">All classes</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="incidentTypeFilter">Incident Type</label>
+          <select id="incidentTypeFilter">
+            <option value="">All types</option>
+            <option value="distracted">Distracted</option>
+            <option value="sleeping">Sleeping</option>
+            <option value="possible_phone_use">Possible phone use</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="attendanceStatusFilter">Attendance Status</label>
+          <select id="attendanceStatusFilter">
+            <option value="">All</option>
+            <option value="present">Present</option>
+            <option value="absent">Absent</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="attendanceSearch">Search Name or ID</label>
+          <input id="attendanceSearch" type="text" placeholder="S001 or Ali" />
+        </div>
+      </section>
+
+      <section class="cards" id="cards"></section>
+
+      <section class="layout">
+        <div class="panel">
+          <h2>Attendance</h2>
+          <div class="split">
+            <div>
+              <h3>Students</h3>
+              <div id="studentsTable"></div>
+            </div>
+            <div>
+              <h3>Teachers</h3>
+              <div id="teachersTable"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Camera and Incident Health</h2>
+          <div id="cameraHealth"></div>
+          <div class="bars" id="incidentBars"></div>
+          <div class="meta-row" id="fileMeta"></div>
+        </div>
+      </section>
+
+      <section class="panel" style="margin-top: 14px">
+        <h2>Incidents</h2>
+        <div id="incidentTable"></div>
+        <h2 style="margin-top: 14px">Snapshots</h2>
+        <div class="gallery" id="gallery"></div>
+      </section>
+
+      <section class="panel" style="margin-top: 14px">
+        <h2>Audit Log</h2>
+        <div id="auditTable"></div>
+      </section>
+    </div>
+
+    <script>
+      const cardsHost = document.getElementById("cards");
+      const studentsHost = document.getElementById("studentsTable");
+      const teachersHost = document.getElementById("teachersTable");
+      const incidentTableHost = document.getElementById("incidentTable");
+      const incidentBarsHost = document.getElementById("incidentBars");
+      const statusText = document.getElementById("statusText");
+      const fileMeta = document.getElementById("fileMeta");
+      const galleryHost = document.getElementById("gallery");
+      const cameraHealthHost = document.getElementById("cameraHealth");
+      const auditTableHost = document.getElementById("auditTable");
+      const refreshBtn = document.getElementById("refreshBtn");
+      const autoRefreshToggle = document.getElementById("autoRefresh");
+      const dateFilter = document.getElementById("dateFilter");
+      const classFilter = document.getElementById("classFilter");
+      const incidentTypeFilter = document.getElementById("incidentTypeFilter");
+      const attendanceStatusFilter = document.getElementById("attendanceStatusFilter");
+      const attendanceSearch = document.getElementById("attendanceSearch");
+
+      let latestPayload = null;
+
+      function esc(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function formatTime(isoText) {
+        if (!isoText) {
+          return "-";
+        }
+        const date = new Date(isoText);
+        if (Number.isNaN(date.getTime())) {
+          return isoText;
+        }
+        return date.toLocaleString();
+      }
+
+      function toDateKey(isoText) {
+        if (!isoText) {
+          return "";
+        }
+        const date = new Date(isoText);
+        if (Number.isNaN(date.getTime())) {
+          return String(isoText).slice(0, 10);
+        }
+        return date.toISOString().slice(0, 10);
+      }
+
+      function toNum(value) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : 0;
+      }
+
+      function confidenceBand(score) {
+        const s = toNum(score);
+        if (s >= 0.75) {
+          return "high";
+        }
+        if (s >= 0.4) {
+          return "medium";
+        }
+        return "low";
+      }
+
+      function ensureClassOptions(classes) {
+        const current = classFilter.value;
+        classFilter.innerHTML = `<option value="">All classes</option>`;
+        for (const className of classes) {
+          const option = document.createElement("option");
+          option.value = className;
+          option.textContent = className;
+          classFilter.appendChild(option);
+        }
+        classFilter.value = classes.includes(current) ? current : "";
+      }
+
+      function matchesClass(row, selectedClass, fallbackClass) {
+        if (!selectedClass) {
+          return true;
+        }
+        const rowClass = (row.class_name || fallbackClass || "").trim();
+        return rowClass === selectedClass;
+      }
+
+      function matchesAttendanceFilters(row, selectedDate, selectedClass, statusFilter, searchText, fallbackClass) {
+        if (!matchesClass(row, selectedClass, fallbackClass)) {
+          return false;
+        }
+
+        if (statusFilter && String(row.status || "").toLowerCase() !== statusFilter) {
+          return false;
+        }
+
+        if (selectedDate && row.first_seen && toDateKey(row.first_seen) !== selectedDate) {
+          return false;
+        }
+
+        if (searchText) {
+          const hay = `${row.person_id || ""} ${row.name || ""}`.toLowerCase();
+          if (!hay.includes(searchText)) {
+            return false;
+          }
+        }
+
+        return true;
+      }
+
+      function matchesIncidentFilters(row, selectedDate, selectedClass, incidentType, fallbackClass) {
+        if (!matchesClass(row, selectedClass, fallbackClass)) {
+          return false;
+        }
+
+        if (incidentType && row.incident_type !== incidentType) {
+          return false;
+        }
+
+        if (selectedDate && toDateKey(row.timestamp) !== selectedDate) {
+          return false;
+        }
+
+        return true;
+      }
+
+      function countByStatus(rows, status) {
+        return rows.filter((x) => String(x.status).toLowerCase() === status).length;
+      }
+
+      function drawCards(summary, students, teachers, incidents, cameraHealth) {
+        const studentPresent = summary?.student_totals?.present ?? countByStatus(students, "present");
+        const studentAbsent = summary?.student_totals?.absent ?? countByStatus(students, "absent");
+        const teacherPresent = summary?.teacher_totals?.present ?? countByStatus(teachers, "present");
+        const teacherAbsent = summary?.teacher_totals?.absent ?? countByStatus(teachers, "absent");
+        const incidentTotal = summary?.incident_totals?.all ?? incidents.length;
+        const distracted = summary?.incident_totals?.distracted ?? incidents.filter((x) => x.incident_type === "distracted").length;
+        const cameraStatus = (cameraHealth.status || "offline").toLowerCase();
+        const reconnects = cameraHealth.reconnect_attempts || 0;
+
+        const specs = [
+          ["Student Present", studentPresent],
+          ["Student Absent", studentAbsent],
+          ["Teacher Present", teacherPresent],
+          ["Teacher Absent", teacherAbsent],
+          ["Total Incidents", incidentTotal],
+          ["Distracted", distracted],
+          ["Camera", cameraStatus],
+          ["Reconnects", reconnects],
+        ];
+
+        cardsHost.innerHTML = specs
+          .map(([k, v]) => `<article class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></article>`)
+          .join("");
+      }
+
+      function drawAttendanceTable(host, rows) {
+        if (!rows.length) {
+          host.innerHTML = `<div class="empty">No matching attendance rows.</div>`;
+          return;
+        }
+
+        const tableRows = rows
+          .map((r) => {
+            const conf = toNum(r.confidence);
+            const band = String(r.confidence_band || confidenceBand(conf));
+            return `
+              <tr>
+                <td>${esc(r.person_id)}</td>
+                <td>${esc(r.name)}</td>
+                <td><span class="status ${String(r.status).toLowerCase()}">${esc(r.status)}</span></td>
+                <td>${esc(conf.toFixed(2))} <span class="band ${esc(band)}">${esc(band)}</span></td>
+                <td>${esc(formatTime(r.first_seen))}</td>
+              </tr>
+            `;
+          })
+          .join("");
+
+        host.innerHTML = `
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Confidence</th>
+                <th>First Seen</th>
+              </tr>
+            </thead>
+            <tbody>${tableRows}</tbody>
+          </table>
+        `;
+      }
+
+      function drawCameraHealth(cameraHealth) {
+        const status = String(cameraHealth.status || "offline").toLowerCase();
+        const reconnectStatus = cameraHealth.reconnect_status || "unknown";
+        const reconnectAttempts = cameraHealth.reconnect_attempts || 0;
+        const reconnectSuccesses = cameraHealth.reconnect_successes || 0;
+        const lastFrameAt = formatTime(cameraHealth.last_frame_at);
+        const lastReconnectAt = formatTime(cameraHealth.last_reconnect_at);
+        const lastError = cameraHealth.last_error || "-";
+
+        cameraHealthHost.innerHTML = `
+          <div style="margin-bottom: 12px">
+            <span class="health ${esc(status)}">${esc(status)}</span>
+            <span class="pill">Reconnect status: ${esc(reconnectStatus)}</span>
+            <span class="pill">Last frame: ${esc(lastFrameAt)}</span>
+            <span class="pill">Last reconnect: ${esc(lastReconnectAt)}</span>
+            <span class="pill">Attempts: ${esc(reconnectAttempts)}</span>
+            <span class="pill">Recovered: ${esc(reconnectSuccesses)}</span>
+            <span class="pill">Last error: ${esc(lastError)}</span>
+          </div>
+        `;
+      }
+
+      function drawIncidentBars(incidents) {
+        if (!incidents.length) {
+          incidentBarsHost.innerHTML = `<div class="empty">No incidents recorded.</div>`;
+          return;
+        }
+
+        const counts = {
+          distracted: 0,
+          sleeping: 0,
+          possible_phone_use: 0,
+        };
+
+        for (const item of incidents) {
+          const key = item.incident_type;
+          counts[key] = (counts[key] ?? 0) + 1;
+        }
+
+        const maxValue = Math.max(...Object.values(counts), 1);
+        incidentBarsHost.innerHTML = Object.entries(counts)
+          .map(([name, value]) => {
+            const width = Math.round((value / maxValue) * 100);
+            return `
+              <div class="bar">
+                <div>${esc(name.replaceAll("_", " "))}</div>
+                <div class="bar-track"><div class="bar-fill" style="width: ${width}%"></div></div>
+                <div>${esc(value)}</div>
+              </div>
+            `;
+          })
+          .join("");
+      }
+
+      function drawIncidentTable(incidents) {
+        if (!incidents.length) {
+          incidentTableHost.innerHTML = `<div class="empty">No matching incident rows.</div>`;
+          return;
+        }
+
+        const latest = [...incidents].reverse().slice(0, 40);
+        const rows = latest
+          .map((r) => {
+            const conf = toNum(r.confidence);
+            const band = String(r.confidence_band || confidenceBand(conf));
+            return `
+              <tr>
+                <td>${esc(formatTime(r.timestamp))}</td>
+                <td>${esc(r.person_name)} (${esc(r.person_id)})</td>
+                <td>${esc(r.incident_type)}</td>
+                <td>${esc(conf.toFixed(2))} <span class="band ${esc(band)}">${esc(band)}</span></td>
+                <td>${esc(r.track_id)}</td>
+              </tr>
+            `;
+          })
+          .join("");
+
+        incidentTableHost.innerHTML = `
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Person</th>
+                <th>Type</th>
+                <th>Confidence</th>
+                <th>Track</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        `;
+      }
+
+      function drawGallery(incidents) {
+        const withShots = incidents.filter((x) => x.snapshot_url);
+        if (!withShots.length) {
+          galleryHost.innerHTML = `<div class="empty">No snapshots available yet.</div>`;
+          return;
+        }
+
+        const latest = [...withShots].reverse().slice(0, 18);
+        galleryHost.innerHTML = latest
+          .map((item) => {
+            const conf = toNum(item.confidence);
+            const band = String(item.confidence_band || confidenceBand(conf));
+            return `
+              <article class="shot">
+                <a href="${esc(item.snapshot_url)}" target="_blank" rel="noreferrer">
+                  <img src="${esc(item.snapshot_url)}" alt="Incident snapshot" loading="lazy" />
+                </a>
+                <div class="meta">
+                  <div><strong>${esc(item.person_name)}</strong></div>
+                  <div>${esc(item.incident_type)} | ${esc(formatTime(item.timestamp))}</div>
+                  <div>${esc(conf.toFixed(2))} <span class="band ${esc(band)}">${esc(band)}</span></div>
+                </div>
+              </article>
+            `;
+          })
+          .join("");
+      }
+
+      function drawFileMeta(files, summary) {
+        const chips = [];
+        if (summary?.session?.class_name) {
+          chips.push(`Class: ${summary.session.class_name}`);
+        }
+        if (summary?.source) {
+          chips.push(`Source: ${summary.source}`);
+        }
+        if (files.students) {
+          chips.push(`Students CSV: ${files.students}`);
+        }
+        if (files.teachers) {
+          chips.push(`Teachers CSV: ${files.teachers}`);
+        }
+        if (files.incidents) {
+          chips.push(`Incidents CSV: ${files.incidents}`);
+        }
+        if (files.summary) {
+          chips.push(`Summary JSON: ${files.summary}`);
+        }
+        fileMeta.innerHTML = chips.map((text) => `<span class="pill">${esc(text)}</span>`).join("");
+      }
+
+      function drawAudit(auditRows) {
+        if (!auditRows.length) {
+          auditTableHost.innerHTML = `<div class="empty">No audit records available yet.</div>`;
+          return;
+        }
+
+        const latest = [...auditRows].reverse().slice(0, 25);
+        const rows = latest
+          .map((item) => {
+            const details = item.details || {};
+            const user = details.client_ip || details.recipient || "-";
+            const note = details.path || details.type || details.reason || details.subject || "-";
+            return `
+              <tr>
+                <td>${esc(formatTime(item.timestamp))}</td>
+                <td>${esc(item.event)}</td>
+                <td>${esc(user)}</td>
+                <td>${esc(note)}</td>
+              </tr>
+            `;
+          })
+          .join("");
+
+        auditTableHost.innerHTML = `
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Event</th>
+                <th>User/IP</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        `;
+      }
+
+      function applyFiltersAndRender() {
+        if (!latestPayload) {
+          return;
+        }
+
+        const summary = latestPayload.summary || {};
+        const fallbackClass = (summary?.session?.class_name || "").trim();
+        const selectedDate = dateFilter.value;
+        const selectedClass = classFilter.value;
+        const selectedIncidentType = incidentTypeFilter.value;
+        const selectedAttendanceStatus = attendanceStatusFilter.value;
+        const searchText = attendanceSearch.value.trim().toLowerCase();
+
+        const students = (latestPayload.students || []).filter((row) =>
+          matchesAttendanceFilters(row, selectedDate, selectedClass, selectedAttendanceStatus, searchText, fallbackClass)
+        );
+
+        const teachers = (latestPayload.teachers || []).filter((row) =>
+          matchesAttendanceFilters(row, selectedDate, selectedClass, selectedAttendanceStatus, searchText, fallbackClass)
+        );
+
+        const incidents = (latestPayload.incidents || []).filter((row) =>
+          matchesIncidentFilters(row, selectedDate, selectedClass, selectedIncidentType, fallbackClass)
+        );
+
+        drawCards(summary, students, teachers, incidents, latestPayload.camera_health || {});
+        drawAttendanceTable(studentsHost, students);
+        drawAttendanceTable(teachersHost, teachers);
+        drawCameraHealth(latestPayload.camera_health || {});
+        drawIncidentBars(incidents);
+        drawIncidentTable(incidents);
+        drawGallery(incidents);
+        drawFileMeta(latestPayload.files || {}, summary);
+        drawAudit(latestPayload.audit || []);
+
+        const stamp = formatTime(latestPayload.last_report_updated_at || latestPayload.generated_at);
+        statusText.textContent = `Last updated: ${stamp}`;
+      }
+
+      async function refreshDashboard() {
+        try {
+          const response = await fetch(`/api/latest?t=${Date.now()}`);
+          if (!response.ok) {
+            throw new Error(`API failed with status ${response.status}`);
+          }
+
+          latestPayload = await response.json();
+          ensureClassOptions(latestPayload.available_classes || []);
+          applyFiltersAndRender();
+        } catch (err) {
+          statusText.textContent = `Dashboard error: ${err.message}`;
+        }
+      }
+
+      refreshBtn.addEventListener("click", refreshDashboard);
+      [dateFilter, classFilter, incidentTypeFilter, attendanceStatusFilter, attendanceSearch].forEach((el) => {
+        el.addEventListener("input", applyFiltersAndRender);
+        el.addEventListener("change", applyFiltersAndRender);
+      });
+
+      refreshDashboard();
+      setInterval(() => {
+        if (autoRefreshToggle.checked) {
+          refreshDashboard();
+        }
+      }, 10000);
+    </script>
+  </body>
+</html>

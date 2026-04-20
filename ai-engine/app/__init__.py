@@ -1,1 +1,1 @@
-"""Starter package for the classroom demo."""
+"""Classroom CCTV monitoring package."""

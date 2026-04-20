@@ -1,0 +1,31 @@
+# Python cache and virtual envs
+**/__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+.venv/
+venv/
+
+# Local environment files
+.env
+*.env
+
+# IDE/editor files
+.vscode/
+.idea/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# AI engine runtime outputs (may include personal data snapshots/logs)
+ai-engine/output/
+ai-engine/output/snapshots/
+ai-engine/output/audit_log.jsonl
+
+# Optional local overrides (keep secrets out of git)
+ai-engine/config.local.json
+
+# Server local artifacts
+server/node_modules/
+server/.env

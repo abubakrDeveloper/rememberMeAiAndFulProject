@@ -1,0 +1,53 @@
+{
+  "source": {
+    "mode": "file",
+    "source": "sample/video.mp4",
+    "reconnect_seconds": 3.0
+  },
+  "detection": {
+    "min_detection_confidence": 0.5,
+    "max_faces": 20,
+    "recognition_tolerance": 0.5
+  },
+  "behavior": {
+    "distracted_seconds": 4.0,
+    "sleeping_seconds": 8.0,
+    "incident_cooldown_seconds": 20.0,
+    "ear_threshold": 0.21,
+    "yaw_threshold_deg": 30.0,
+    "smoothing_window_frames": 8,
+    "smoothing_required_frames": 5
+  },
+  "attendance": {
+    "min_confirm_frames": 5,
+    "absent_if_not_seen": true
+  },
+  "runtime": {
+    "max_fps": 10.0,
+    "display": true,
+    "save_annotated_video": false,
+    "stop_after_seconds": 0.0
+  },
+  "paths": {
+    "roster_students_dir": "roster/students",
+    "roster_teachers_dir": "roster/teachers",
+    "output_dir": "output",
+    "snapshots_dir": "output/snapshots"
+  },
+  "session": {
+    "institute_name": "My Institute",
+    "class_name": "Class 10A",
+    "teacher_id": "T001",
+    "admin_name": "Principal"
+  },
+  "admin_email": {
+    "enabled": false,
+    "sender_email": "",
+    "recipient_email": "",
+    "smtp_host": "",
+    "smtp_port": 587,
+    "username": "",
+    "password": "",
+    "use_tls": true
+  }
+}
