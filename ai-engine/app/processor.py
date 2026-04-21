@@ -137,14 +137,21 @@ class ClassroomMonitorApp:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
             # --- detect faces ---
-            det_result = face_det.process(rgb)
             boxes: List[Tuple[int, int, int, int]] = []
-            if det_result.detections:
-                for det in det_result.detections:
-                    boxes.append(self._abs_box(det, w_frame, h_frame))
+            try:
+                det_result = face_det.process(rgb)
+                if det_result.detections:
+                    for det in det_result.detections:
+                        boxes.append(self._abs_box(det, w_frame, h_frame))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[frame {frame_count}] FaceDetection error: {exc}")
 
             # --- face mesh for all faces at once ---
-            mesh_result = face_mesh.process(rgb)
+            mesh_result = None
+            try:
+                mesh_result = face_mesh.process(rgb)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[frame {frame_count}] FaceMesh error: {exc}")
 
             # --- track faces ---
             tracks = self.tracker.update(boxes, now_ts)

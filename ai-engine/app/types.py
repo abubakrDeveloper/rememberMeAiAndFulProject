@@ -49,6 +49,7 @@ class Track:
 @dataclass
 class BehaviorState:
     no_eye_since: Optional[float] = None
+    still_since: Optional[float] = None
     last_incident_at: Dict[str, float] = field(default_factory=dict)
     current_label: str = "unknown"
     recent_labels: List[str] = field(default_factory=list)
