@@ -43,12 +43,14 @@ class RuntimeConfig:
     display: bool = True
     save_annotated_video: bool = False
     stop_after_seconds: float = 0.0
+    app_mode: str = "classroom"  # classroom | general
 
 
 @dataclass
 class PathsConfig:
     roster_students_dir: str = "roster/students"
     roster_teachers_dir: str = "roster/teachers"
+    roster_dir: str = "roster/people"
     output_dir: str = "output"
     snapshots_dir: str = "output/snapshots"
 

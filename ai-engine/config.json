@@ -1,13 +1,13 @@
 {
   "source": {
     "mode": "file",
-    "source": "sample/video.mp4",
+    "source": "sample/D12_20260424095708.mp4",
     "reconnect_seconds": 3.0
   },
   "detection": {
     "min_detection_confidence": 0.5,
     "max_faces": 20,
-    "recognition_tolerance": 0.5
+    "recognition_tolerance": 0.65
   },
   "behavior": {
     "distracted_seconds": 4.0,

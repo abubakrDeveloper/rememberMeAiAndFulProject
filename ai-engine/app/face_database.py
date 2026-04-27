@@ -20,9 +20,24 @@ class FaceDatabase:
     @staticmethod
     def _parse_person(file_path: Path, role: str) -> PersonRecord:
         stem = file_path.stem
+        # Format: "FULL NAME - 123456789" (name first, then numeric ID after " - ")
+        if " - " in stem:
+            name_part, id_part = stem.rsplit(" - ", 1)
+            id_part = id_part.strip()
+            if id_part.isdigit():
+                return PersonRecord(
+                    person_id=id_part,
+                    name=name_part.strip().title(),
+                    role=role,
+                )
         parts = stem.split("_", 1)
-        person_id = parts[0].strip()
-        name = parts[1].replace("_", " ").strip() if len(parts) > 1 else person_id
+        # Format: "ID_Name" where ID is a pure number (e.g. "001_John_Doe")
+        if parts[0].isdigit() and len(parts) > 1:
+            person_id = parts[0].strip()
+            name = parts[1].replace("_", " ").strip()
+        else:
+            name = stem.replace("_", " ").strip()
+            person_id = stem.strip()
         return PersonRecord(person_id=person_id, name=name, role=role)
 
     def _load_role_dir(self, role_dir: Path, role: str) -> int:
@@ -52,6 +67,11 @@ class FaceDatabase:
             "people": len(self._records),
         }
 
+    def load_people_dir(self, people_dir: str) -> Dict[str, int]:
+        """Load faces from a single directory with a generic 'person' role."""
+        count = self._load_role_dir(Path(people_dir), "person")
+        return {"people": count}
+
     def has_people(self) -> bool:
         return len(self._records) > 0
 
@@ -72,12 +92,15 @@ class FaceDatabase:
         return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
     def match(self, face_rgb: np.ndarray) -> Tuple[Optional[PersonRecord], float]:
-        """Match an RGB face crop against the roster."""
+        """Match an RGB face crop (with padding) against the roster."""
         if not self._encodings:
             return None, 0.0
-        face_rgb = self._ensure_min_size(face_rgb)
+        face_rgb = self._ensure_min_size(face_rgb, min_dim=80)
+        face_rgb = np.ascontiguousarray(face_rgb, dtype=np.uint8)
         h, w = face_rgb.shape[:2]
-        # Tell face_recognition the whole crop is a face (skip re-detection)
+        # Use the entire crop as the face region — bypasses dlib HOG which fails
+        # on top-down CCTV angles. The bounding box from MediaPipe is already
+        # tight around the face.
         locations = [(0, w, h, 0)]
         encs = face_recognition.face_encodings(face_rgb, known_face_locations=locations)
         if not encs:

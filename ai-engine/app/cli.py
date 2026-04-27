@@ -14,6 +14,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--display", action="store_true", help="Force display window on")
     parser.add_argument("--no-display", action="store_true", help="Force display window off")
     parser.add_argument("--stop-after", type=float, default=None, help="Optional stop after N seconds")
+    parser.add_argument("--general", action="store_true", help="General face recognition mode (skips classroom-only features)")
+    parser.add_argument("--roster", help="Path to directory of face images for general mode (default: roster/people)")
     return parser
 
 
@@ -28,6 +30,10 @@ def apply_overrides(cfg: AppConfig, args: argparse.Namespace) -> AppConfig:
         cfg.runtime.display = False
     if args.stop_after is not None:
         cfg.runtime.stop_after_seconds = max(0.0, args.stop_after)
+    if args.general:
+        cfg.runtime.app_mode = "general"
+    if args.roster:
+        cfg.paths.roster_dir = args.roster
     return cfg
 
 
