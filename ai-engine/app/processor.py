@@ -141,6 +141,8 @@ class ClassroomMonitorApp:
         frame_count = 0
         start_ts = time.time()
         last_process_ts = 0.0
+        last_recognize_ts: float = -999.0  # controls 30-second recognition interval
+        RECOGNIZE_INTERVAL = 30.0  # seconds between recognition runs per track
         # Persistent overlay: person_id -> (bbox, label, color, last_seen_ts)
         # Once a student is recognized we keep drawing their box every frame,
         # dimmed when not actively detected in the current frame.
@@ -179,10 +181,15 @@ class ClassroomMonitorApp:
                 last_process_ts = now_ts
 
             h_frame, w_frame = frame.shape[:2]
+            incidents_to_record: List[Incident] = []
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            # Multi-scale detection: 1280px catches mid-range faces; 640px catches
-            # distant/small faces in a wide classroom CCTV shot.
+            # Check if it is time to run the expensive recognition pipeline.
+            run_recognition = (now_ts - last_recognize_ts >= RECOGNIZE_INTERVAL)
+            if run_recognition:
+                last_recognize_ts = now_ts
+
+            # --- Detection: runs every processed frame for accurate bboxes ---
             _SCALES = [1280, 640] if w_frame > 1280 else [w_frame]
             detected_boxes: List[Tuple[int, int, int, int]] = []
             for _DET_W in _SCALES:
@@ -221,55 +228,71 @@ class ClassroomMonitorApp:
             # Use the 1280px downscale for FaceMesh (consistent with detection)
             _mesh_w = min(1280, w_frame)
             _mesh_scale = _mesh_w / w_frame
-            rgb_small = cv2.resize(rgb, (_mesh_w, int(h_frame * _mesh_scale)), interpolation=cv2.INTER_AREA)
-            det_scale = _mesh_scale  # reuse for landmark coordinate scaling
+            rgb_small_mesh = cv2.resize(rgb, (_mesh_w, int(h_frame * _mesh_scale)), interpolation=cv2.INTER_AREA)
 
             # --- face mesh for all faces at once ---
             mesh_result = None
             try:
-                mesh_result = face_mesh.process(rgb_small)
+                mesh_result = face_mesh.process(rgb_small_mesh)
             except Exception as exc:  # noqa: BLE001
                 print(f"[frame {frame_count}] FaceMesh error: {exc}")
 
-            # --- track faces ---
+            # --- track faces (always runs to keep bboxes accurate) ---
             tracks = self.tracker.update(boxes, now_ts)
-            incidents_to_record: List[Incident] = []
 
             for track in tracks:
                 x, y, w, h = track.bbox
                 if w < 10 or h < 10:
                     continue
 
-                # Crop the exact detected bounding box for recognition.
-                # known_face_locations bypasses dlib HOG, so no padding needed.
-                x1 = max(0, x)
-                y1 = max(0, y)
-                x2 = min(w_frame, x + w)
-                y2 = min(h_frame, y + h)
-                face_rgb = rgb[y1:y2, x1:x2]
-                if face_rgb.size == 0:
-                    continue
+                # --- Recognition: only when interval has elapsed OR track is new ---
+                if run_recognition or not track.person_id:
+                    x1 = max(0, x)
+                    y1 = max(0, y)
+                    x2 = min(w_frame, x + w)
+                    y2 = min(h_frame, y + h)
+                    face_rgb = rgb[y1:y2, x1:x2]
+                    if face_rgb.size == 0:
+                        continue
 
-                person, score = self.face_db.match(face_rgb)
-                if person:
-                    track.person_id = person.person_id
-                    track.person_name = person.name
-                    if self.cfg.runtime.app_mode == "classroom":
-                        self.attendance.mark_seen(person, datetime.now())
+                    person, score = self.face_db.match(face_rgb)
+                    if person:
+                        track.person_id = person.person_id
+                        track.person_name = person.name
+                        if self.cfg.runtime.app_mode == "classroom":
+                            self.attendance.mark_seen(person, datetime.now())
+                    else:
+                        person = PersonRecord(
+                            person_id=f"unknown_{track.track_id}",
+                            name="Unknown",
+                            role="student" if self.cfg.runtime.app_mode == "classroom" else "person",
+                        )
                 else:
-                    person = PersonRecord(
-                        person_id=f"unknown_{track.track_id}",
-                        name="Unknown",
-                        role="student" if self.cfg.runtime.app_mode == "classroom" else "person",
-                    )
+                    # Reuse cached identity from the track
+                    if track.person_id and not track.person_id.startswith("unknown_"):
+                        person = PersonRecord(
+                            person_id=track.person_id,
+                            name=track.person_name,
+                            role="student",
+                        )
+                        score = 0.0
+                        # Count attendance every frame, not just on recognition runs
+                        if self.cfg.runtime.app_mode == "classroom":
+                            self.attendance.mark_seen(person, datetime.now())
+                    else:
+                        person = PersonRecord(
+                            person_id=f"unknown_{track.track_id}",
+                            name="Unknown",
+                            role="student" if self.cfg.runtime.app_mode == "classroom" else "person",
+                        )
+                        score = 0.0
 
                 # Get per-face landmarks (mesh was run on downscaled image)
-                det_w = rgb_small.shape[1]
-                det_h_px = rgb_small.shape[0]
-                # scale bbox down to match the mesh image
+                det_w = rgb_small_mesh.shape[1]
+                det_h_px = rgb_small_mesh.shape[0]
                 scaled_bbox = (
-                    int(x * det_scale), int(y * det_scale),
-                    int(w * det_scale), int(h * det_scale),
+                    int(x * _mesh_scale), int(y * _mesh_scale),
+                    int(w * _mesh_scale), int(h * _mesh_scale),
                 )
                 landmarks = self._get_face_landmarks(mesh_result, scaled_bbox, det_w, det_h_px)
 
