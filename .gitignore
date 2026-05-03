@@ -29,3 +29,8 @@ ai-engine/config.local.json
 # Server local artifacts
 server/node_modules/
 server/.env
+
+ai-engine/sample/
+ai-engine/roster/
+
+node_modules/
