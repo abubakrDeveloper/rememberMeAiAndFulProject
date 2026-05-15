@@ -175,6 +175,10 @@ class ClassroomMonitorApp:
         ATTEND_MIN_SCORE = 0.65
         # Stale box TTL: stop drawing a last-known-position box after this many seconds
         STALE_BOX_TTL = 5.0
+        # Per-track recognition cooldown for unconfirmed tracks (avoids running ResNet
+        # every frame on faces that haven't been matched yet)
+        _track_recog_ts: Dict[int, float] = {}
+        UNCONFIRMED_RECOG_INTERVAL = 0.5  # seconds between attempts for unconfirmed tracks
 
         writer = None
         if self.cfg.runtime.save_annotated_video:
@@ -206,7 +210,8 @@ class ClassroomMonitorApp:
                 last_process_ts = now_ts
 
             h_frame, w_frame = frame.shape[:2]
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # RGB conversion is deferred: only computed when recognition actually runs.
+            _rgb: np.ndarray | None = None
 
             # Check if it is time to run the expensive recognition pipeline.
             run_recognition = (now_ts - last_recognize_ts >= RECOGNIZE_INTERVAL)
@@ -214,13 +219,14 @@ class ClassroomMonitorApp:
                 last_recognize_ts = now_ts
 
             # --- Face detection: two-tier strategy (mirrors the old MediaPipe approach) ---
-            # Fast path (every frame): single 960px-wide pass — keeps tracker alive.
+            # Fast path (every frame): single 640px-wide pass — keeps tracker alive.
             # Slow path (every 2s): 2×2 tiled pass at 960px per tile — finds small/
             #   angled faces that the single-pass misses at the back of the room.
-            _DET_W = 960
+            _DET_W_FAST = 640
+            _DET_W_TILED = 960
 
             single_boxes = self._yunet_detect_scaled(
-                face_detector, frame, _DET_W, w_frame, h_frame
+                face_detector, frame, _DET_W_FAST, w_frame, h_frame
             )
 
             if now_ts - last_tiled_det_ts >= TILED_DET_INTERVAL:
@@ -241,7 +247,7 @@ class ClassroomMonitorApp:
                         if tw < 20 or th < 20:
                             continue
                         tile_boxes = self._yunet_detect_scaled(
-                            face_detector, tile_bgr, _DET_W, tw, th
+                            face_detector, tile_bgr, _DET_W_TILED, tw, th
                         )
                         for bx, by, bw, bh in tile_boxes:
                             tiled.append((ox + bx, oy + by, bw, bh))
@@ -257,19 +263,28 @@ class ClassroomMonitorApp:
                 if w < 30 or h < 30:
                     continue
 
-                # --- Recognition: only when interval has elapsed OR track not yet locked ---
-                if run_recognition or not track.person_id:
-                    # Pad the YuNet box so MTCNN has context around the face.
+                # --- Recognition: only when interval elapsed OR track not yet locked ---
+                unconfirmed_due = (
+                    not track.person_id
+                    and now_ts - _track_recog_ts.get(track.track_id, 0.0) >= UNCONFIRMED_RECOG_INTERVAL
+                )
+                if run_recognition or unconfirmed_due:
+                    _track_recog_ts[track.track_id] = now_ts
+                    # Pad the YuNet box slightly for better ResNet accuracy.
                     _PAD = max(20, int(min(w, h) * 0.15))
                     x1 = max(0, x - _PAD)
                     y1 = max(0, y - _PAD)
                     x2 = min(w_frame, x + w + _PAD)
                     y2 = min(h_frame, y + h + _PAD)
-                    face_rgb = rgb[y1:y2, x1:x2]
+                    # Lazy RGB conversion — only on the first track that needs recognition
+                    if _rgb is None:
+                        _rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    face_rgb = _rgb[y1:y2, x1:x2]
                     if face_rgb.size == 0:
                         continue
 
-                    _emb = self.face_db.encode(face_rgb)
+                    # Skip MTCNN re-detection; YuNet already found this face.
+                    _emb = self.face_db.encode_crop(face_rgb)
                     if _emb is not None:
                         person, score = self.face_db.match_embedding(_emb)
                         if person is None:

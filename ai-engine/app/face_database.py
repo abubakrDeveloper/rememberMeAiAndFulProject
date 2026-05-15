@@ -27,6 +27,10 @@ class FaceDatabase:
         self._encodings: Dict[str, List[np.ndarray]] = {}
         # Short-term re-ID gallery: last 10 confirmed-frame embeddings per person
         self._recent_embeddings: Dict[str, deque] = {}
+        # Pre-cached enrollment matrix for vectorised matching (rebuilt after load)
+        self._enroll_matrix: Optional[np.ndarray] = None
+        self._enroll_pids: List[str] = []
+        self._enroll_counts: List[int] = []
 
     @staticmethod
     def _parse_person(file_path: Path, role: str) -> PersonRecord:
@@ -62,6 +66,41 @@ class FaceDatabase:
         norm = float(np_norm(emb))
         return emb / (norm + 1e-6)
 
+    def encode_crop(self, face_rgb: np.ndarray) -> Optional[np.ndarray]:
+        """Encode a pre-cropped face region, skipping MTCNN re-detection.
+
+        ~3-5× faster than encode() because MTCNN alignment is omitted.
+        Use this when the crop already comes from a reliable detector (YuNet).
+        """
+        if face_rgb.size == 0 or face_rgb.shape[0] < 10 or face_rgb.shape[1] < 10:
+            return None
+        img = Image.fromarray(face_rgb).resize((160, 160), Image.Resampling.BILINEAR)
+        arr = np.array(img, dtype=np.float32)
+        tensor = torch.from_numpy(arr).permute(2, 0, 1)
+        tensor = (tensor - 127.5) / 128.0
+        with torch.no_grad():
+            emb = self._resnet(tensor.unsqueeze(0).to(self._device)).cpu().numpy()[0]
+        norm = float(np_norm(emb))
+        return emb / (norm + 1e-6)
+
+    def _rebuild_enroll_matrix(self) -> None:
+        """Pre-compute stacked enrollment matrix for vectorised cosine matching."""
+        if not self._encodings:
+            self._enroll_matrix = None
+            self._enroll_pids = []
+            self._enroll_counts = []
+            return
+        pids = list(self._encodings.keys())
+        rows: List[np.ndarray] = []
+        counts: List[int] = []
+        for pid in pids:
+            vecs = self._encodings[pid]
+            rows.extend(vecs)
+            counts.append(len(vecs))
+        self._enroll_pids = pids
+        self._enroll_counts = counts
+        self._enroll_matrix = np.stack(rows).astype(np.float32)  # (N_total, 512)
+
     def _load_role_dir(self, role_dir: Path, role: str) -> int:
         if not role_dir.exists():
             return 0
@@ -89,6 +128,7 @@ class FaceDatabase:
     def load(self, students_dir: str, teachers_dir: str, **_) -> Dict[str, int]:
         student_count = self._load_role_dir(Path(students_dir), "student")
         teacher_count = self._load_role_dir(Path(teachers_dir), "teacher")
+        self._rebuild_enroll_matrix()
         return {
             "students": student_count,
             "teachers": teacher_count,
@@ -98,6 +138,7 @@ class FaceDatabase:
     def load_people_dir(self, people_dir: str) -> Dict[str, int]:
         """Load faces from a single directory with a generic 'person' role."""
         count = self._load_role_dir(Path(people_dir), "person")
+        self._rebuild_enroll_matrix()
         return {"people": count}
 
     def has_people(self) -> bool:
@@ -118,15 +159,19 @@ class FaceDatabase:
 
         Returns (PersonRecord, score) only when the winner beats the threshold
         (1 - tolerance = 0.80) AND clears the runner-up by at least MARGIN (0.15).
+        Uses a pre-cached matrix for a single vectorised dot-product pass.
         """
-        if not self._encodings:
+        if self._enroll_matrix is None or not self._enroll_pids:
             return None, 0.0
 
-        # Per-person best: max cosine similarity over all that person's enrollment vectors
-        per_person_best: Dict[str, float] = {
-            pid: max(float(np.dot(embedding, vec)) for vec in vecs)
-            for pid, vecs in self._encodings.items()
-        }
+        # Single matrix multiply — O(N) in NumPy instead of a Python loop
+        sims = self._enroll_matrix @ embedding.astype(np.float32)  # (N_total,)
+
+        per_person_best: Dict[str, float] = {}
+        idx = 0
+        for pid, cnt in zip(self._enroll_pids, self._enroll_counts):
+            per_person_best[pid] = float(sims[idx:idx + cnt].max())
+            idx += cnt
 
         ranked = sorted(per_person_best.items(), key=lambda kv: kv[1], reverse=True)
         best_id, best_sim = ranked[0]
