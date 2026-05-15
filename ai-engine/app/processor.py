@@ -3,23 +3,20 @@ from __future__ import annotations
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import cv2
-import mediapipe as mp
 import numpy as np
 
 from .attendance import AttendanceManager
-from .behavior import BehaviorAnalyzer
 from .config import AppConfig
 from .face_database import FaceDatabase
 from .reporting import Reporter
 from .tracking import CentroidTracker
-from .types import Incident, PersonRecord
+from .types import PersonRecord
 from .video import VideoInput
 
-mp_face_mesh = mp.solutions.face_mesh
-mp_face_detection = mp.solutions.face_detection
+_YUNET_MODEL_PATH = "models/face_detection_yunet_2023mar.onnx"
 
 
 class ClassroomMonitorApp:
@@ -28,7 +25,6 @@ class ClassroomMonitorApp:
 
         self.face_db = FaceDatabase(tolerance=self.cfg.detection.recognition_tolerance)
         self.attendance = AttendanceManager(min_confirm_frames=self.cfg.attendance.min_confirm_frames)
-        self.behavior = BehaviorAnalyzer(self.cfg.behavior)
         self.tracker = CentroidTracker(max_distance=80)
         self.video = VideoInput(self.cfg.source)
         self.reporter = Reporter(
@@ -40,134 +36,6 @@ class ClassroomMonitorApp:
 
         self._known_students: List[PersonRecord] = []
         self._known_teachers: List[PersonRecord] = []
-
-    @staticmethod
-    def _abs_box(det, w: int, h: int) -> Tuple[int, int, int, int]:
-        """Convert MediaPipe relative bbox to absolute (x, y, w, h)."""
-        bb = det.location_data.relative_bounding_box
-        x = max(0, int(bb.xmin * w))
-        y = max(0, int(bb.ymin * h))
-        bw = min(int(bb.width * w), w - x)
-        bh = min(int(bb.height * h), h - y)
-        return x, y, bw, bh
-
-    @staticmethod
-    def _nms_boxes(
-        boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.35
-    ) -> List[Tuple[int, int, int, int]]:
-        """Non-maximum suppression: remove duplicate boxes based on IoU."""
-        if not boxes:
-            return []
-        # Sort by descending box area so larger (usually better) detections are kept first.
-        sorted_boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)
-        kept: List[Tuple[int, int, int, int]] = []
-        for box in sorted_boxes:
-            x1, y1, w1, h1 = box
-            suppressed = False
-            for kx, ky, kw, kh in kept:
-                ix = max(x1, kx)
-                iy = max(y1, ky)
-                ix2 = min(x1 + w1, kx + kw)
-                iy2 = min(y1 + h1, ky + kh)
-                if ix2 <= ix or iy2 <= iy:
-                    continue
-                inter = (ix2 - ix) * (iy2 - iy)
-                union = w1 * h1 + kw * kh - inter
-                if union > 0 and inter / union > iou_threshold:
-                    suppressed = True
-                    break
-            if not suppressed:
-                kept.append(box)
-        return kept
-
-    def _detect_faces_tiled(
-        self,
-        rgb: np.ndarray,
-        detector,
-        tile_cols: int = 2,
-        tile_rows: int = 2,
-        tile_det_width: int = 960,
-    ) -> List[Tuple[int, int, int, int]]:
-        """Detect faces by running the detector on a 2×2 grid of overlapping tiles.
-
-        Each tile covers ~60% of the frame dimension so adjacent tiles overlap by ~20%.
-        This makes faces appear ~2× larger in each tile vs. a single 1280-wide downscale,
-        which substantially improves detection of small or partially-visible faces.
-        """
-        h_frame, w_frame = rgb.shape[:2]
-        # Tile dimensions: 60% of frame so that two tiles cover the full frame with ~20% overlap.
-        tile_w = int(w_frame * 0.60)
-        tile_h = int(h_frame * 0.60)
-        # Stride: moves forward by 40% so col0=(0..60%) col1=(40%..100%)
-        stride_x = w_frame - tile_w   # puts right tile flush with right edge
-        stride_y = h_frame - tile_h   # puts bottom tile flush with bottom edge
-
-        all_boxes: List[Tuple[int, int, int, int]] = []
-
-        for row in range(tile_rows):
-            for col in range(tile_cols):
-                ox = col * stride_x
-                oy = row * stride_y
-                x2 = min(w_frame, ox + tile_w)
-                y2 = min(h_frame, oy + tile_h)
-                tile = rgb[oy:y2, ox:x2]
-                th, tw = tile.shape[:2]
-                if tw < 20 or th < 20:
-                    continue
-                # Scale tile to tile_det_width for MediaPipe.
-                det_scale = min(tile_det_width, tw) / tw
-                det_w = int(tw * det_scale)
-                det_h = int(th * det_scale)
-                small = cv2.resize(tile, (det_w, det_h), interpolation=cv2.INTER_AREA)
-                try:
-                    result = detector.process(small)
-                except Exception:
-                    continue
-                if not result.detections:
-                    continue
-                inv = 1.0 / det_scale
-                for det in result.detections:
-                    sx, sy, sw, sh = self._abs_box(det, det_w, det_h)
-                    # Project back to full-frame coordinates.
-                    fx = ox + int(sx * inv)
-                    fy = oy + int(sy * inv)
-                    fw = int(sw * inv)
-                    fh = int(sh * inv)
-                    fx = max(0, min(fx, w_frame - 1))
-                    fy = max(0, min(fy, h_frame - 1))
-                    fw = min(fw, w_frame - fx)
-                    fh = min(fh, h_frame - fy)
-                    ar = fw / fh if fh > 0 else 0
-                    if fw >= 50 and fh >= 50 and 0.4 <= ar <= 2.5:
-                        all_boxes.append((fx, fy, fw, fh))
-
-        # Also run a single full-frame pass at tile_det_width — catches faces that
-        # happen to fall exactly at a tile boundary and are missed by every tile.
-        full_scale = tile_det_width / w_frame
-        full_w = int(w_frame * full_scale)
-        full_h = int(h_frame * full_scale)
-        small_full = cv2.resize(rgb, (full_w, full_h), interpolation=cv2.INTER_AREA)
-        try:
-            result_full = detector.process(small_full)
-            if result_full.detections:
-                inv_full = 1.0 / full_scale
-                for det in result_full.detections:
-                    sx, sy, sw, sh = self._abs_box(det, full_w, full_h)
-                    fx = int(sx * inv_full)
-                    fy = int(sy * inv_full)
-                    fw = int(sw * inv_full)
-                    fh = int(sh * inv_full)
-                    fx = max(0, min(fx, w_frame - 1))
-                    fy = max(0, min(fy, h_frame - 1))
-                    fw = min(fw, w_frame - fx)
-                    fh = min(fh, h_frame - fy)
-                    ar = fw / fh if fh > 0 else 0
-                    if fw >= 50 and fh >= 50 and 0.4 <= ar <= 2.5:
-                        all_boxes.append((fx, fy, fw, fh))
-        except Exception:
-            pass
-
-        return self._nms_boxes(all_boxes)
 
     @staticmethod
     def _draw_box(frame: np.ndarray, bbox: Tuple[int, int, int, int], label: str, color: Tuple[int, int, int]) -> None:
@@ -208,28 +76,6 @@ class ClassroomMonitorApp:
             cv2.putText(frame, name, (px + 20, y_pos + 12),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.48, dot_color, 1, cv2.LINE_AA)
 
-    def _get_face_landmarks(
-        self,
-        mesh_results,
-        bbox: Tuple[int, int, int, int],
-        img_w: int,
-        img_h: int,
-    ) -> Optional[np.ndarray]:
-        """Find the Face Mesh result whose nose tip is inside bbox."""
-        if not mesh_results or not mesh_results.multi_face_landmarks:
-            return None
-        bx, by, bw, bh = bbox
-        for face_lm in mesh_results.multi_face_landmarks:
-            nose = face_lm.landmark[1]
-            nx, ny = int(nose.x * img_w), int(nose.y * img_h)
-            if bx <= nx <= bx + bw and by <= ny <= by + bh:
-                lm = np.array(
-                    [[l.x, l.y, l.z] for l in face_lm.landmark],
-                    dtype=np.float32,
-                )
-                return lm
-        return None
-
     def _load_roster(self) -> None:
         if self.cfg.runtime.app_mode != "classroom":
             roster_dir = self.cfg.paths.roster_dir
@@ -261,9 +107,6 @@ class ClassroomMonitorApp:
         last_process_ts = 0.0
         last_recognize_ts: float = -999.0  # controls 30-second recognition interval
         RECOGNIZE_INTERVAL = 30.0  # seconds between recognition runs per track
-        last_tiled_det_ts: float = -999.0   # controls tiled detection interval
-        TILED_DET_INTERVAL = 2.0            # seconds between expensive tiled passes
-        _cached_boxes: List[Tuple[int, int, int, int]] = []  # last tiled result
         # Persistent overlay: person_id -> (bbox, label, color, last_seen_ts)
         # Once a student is recognized we keep drawing their box every frame,
         # dimmed when not actively detected in the current frame.
@@ -284,16 +127,13 @@ class ClassroomMonitorApp:
             out_path = str(Path(self.cfg.paths.output_dir) / "annotated_output.mp4")
             writer = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
 
-        face_det = mp_face_detection.FaceDetection(
-            model_selection=1,
-            min_detection_confidence=self.cfg.detection.min_detection_confidence,
-        )
-        face_mesh = mp_face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=self.cfg.detection.max_faces,
-            refine_landmarks=True,
-            min_detection_confidence=self.cfg.detection.min_detection_confidence,
-            min_tracking_confidence=0.4,
+        face_detector = cv2.FaceDetectorYN.create(
+            _YUNET_MODEL_PATH,
+            "",
+            (640, 640),
+            score_threshold=self.cfg.detection.min_detection_confidence,
+            nms_threshold=0.3,
+            top_k=self.cfg.detection.max_faces,
         )
 
         while True:
@@ -309,7 +149,6 @@ class ClassroomMonitorApp:
                 last_process_ts = now_ts
 
             h_frame, w_frame = frame.shape[:2]
-            incidents_to_record: List[Incident] = []
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
             # Check if it is time to run the expensive recognition pipeline.
@@ -317,58 +156,21 @@ class ClassroomMonitorApp:
             if run_recognition:
                 last_recognize_ts = now_ts
 
-            # --- Face detection: two-tier strategy for speed vs. coverage ---
-            # Fast path (every frame): single full-frame pass at 960px — 1 inference,
-            #   keeps tracker alive and bboxes current between tiled runs.
-            # Slow path (every 2s): full tiled 2×2 pass — finds small/angled faces
-            #   that the single pass misses, cached until the next tiled run.
-            run_tiled = (now_ts - last_tiled_det_ts >= TILED_DET_INTERVAL)
-
-            # Always run the cheap single-pass for fresh tracking boxes.
-            _det_scale = 960 / w_frame
-            _det_w = 960
-            _det_h = int(h_frame * _det_scale)
-            rgb_small_det = cv2.resize(rgb, (_det_w, _det_h), interpolation=cv2.INTER_AREA)
-            single_boxes: List[Tuple[int, int, int, int]] = []
+            # --- Face detection via YuNet ---
+            face_detector.setInputSize((w_frame, h_frame))
+            boxes: List[Tuple[int, int, int, int]] = []
             try:
-                det_result = face_det.process(rgb_small_det)
-                if det_result.detections:
-                    inv = 1.0 / _det_scale
-                    for det in det_result.detections:
-                        sx, sy, sw, sh = self._abs_box(det, _det_w, _det_h)
-                        fx = int(sx * inv); fy = int(sy * inv)
-                        fw = int(sw * inv); fh = int(sh * inv)
-                        ar = fw / fh if fh > 0 else 0
-                        if fw >= 50 and fh >= 50 and 0.4 <= ar <= 2.5:
-                            single_boxes.append((fx, fy, fw, fh))
+                _, faces = face_detector.detect(frame)
+                if faces is not None:
+                    for face in faces:
+                        x, y, w, h = int(face[0]), int(face[1]), int(face[2]), int(face[3])
+                        x = max(0, x); y = max(0, y)
+                        w = min(w, w_frame - x); h = min(h, h_frame - y)
+                        ar = w / h if h > 0 else 0
+                        if w >= 50 and h >= 50 and 0.4 <= ar <= 2.5:
+                            boxes.append((x, y, w, h))
             except Exception as exc:  # noqa: BLE001
                 print(f"[frame {frame_count}] FaceDetection error: {exc}")
-
-            if run_tiled:
-                last_tiled_det_ts = now_ts
-                try:
-                    _cached_boxes = self._detect_faces_tiled(rgb, face_det)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[frame {frame_count}] Tiled detection error: {exc}")
-                    _cached_boxes = []
-
-            # Merge: start from the tiled cache, then add any single-pass boxes
-            # not already covered by a cached box (NMS-style).
-            detected_boxes = self._nms_boxes(single_boxes + _cached_boxes)
-
-            boxes: List[Tuple[int, int, int, int]] = detected_boxes
-
-            # Use the 1280px downscale for FaceMesh (consistent with detection)
-            _mesh_w = min(1280, w_frame)
-            _mesh_scale = _mesh_w / w_frame
-            rgb_small_mesh = cv2.resize(rgb, (_mesh_w, int(h_frame * _mesh_scale)), interpolation=cv2.INTER_AREA)
-
-            # --- face mesh for all faces at once ---
-            mesh_result = None
-            try:
-                mesh_result = face_mesh.process(rgb_small_mesh)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[frame {frame_count}] FaceMesh error: {exc}")
 
             # --- track faces (always runs to keep bboxes accurate) ---
             tracks = self.tracker.update(boxes, now_ts)
@@ -445,36 +247,8 @@ class ClassroomMonitorApp:
                         )
                         score = 0.0
 
-                # Get per-face landmarks (mesh was run on downscaled image)
-                det_w = rgb_small_mesh.shape[1]
-                det_h_px = rgb_small_mesh.shape[0]
-                scaled_bbox = (
-                    int(x * _mesh_scale), int(y * _mesh_scale),
-                    int(w * _mesh_scale), int(h * _mesh_scale),
-                )
-                landmarks = self._get_face_landmarks(mesh_result, scaled_bbox, det_w, det_h_px)
-
-                if self.cfg.runtime.app_mode == "classroom":
-                    state_label, incidents = self.behavior.analyze(
-                        key=track.person_id or f"track_{track.track_id}",
-                        person=person,
-                        track_id=track.track_id,
-                        bbox=track.bbox,
-                        landmarks=landmarks,
-                        now_ts=now_ts,
-                    )
-                    label = f"{person.name} | {state_label} | {score:.2f}"
-                    if state_label in {"distracted", "sleeping"}:
-                        color = (0, 0, 255)
-                    elif state_label == "focused":
-                        color = (0, 200, 0)
-                    else:
-                        color = (0, 255, 255)
-                    incidents_to_record.extend([i for i in incidents if i.role == "student"])
-                else:
-                    incidents = []
-                    label = f"{person.name} ({score:.2f})" if person.name != "Unknown" else "Unknown"
-                    color = (0, 200, 0) if person.name != "Unknown" else (0, 165, 255)
+                label = f"{person.name} ({score:.2f})" if person.name != "Unknown" else "Unknown"
+                color = (0, 200, 0) if person.name != "Unknown" else (0, 165, 255)
 
                 self._draw_box(frame, track.bbox, label, color)
                 # Update persistent roster for recognized students.
@@ -509,12 +283,6 @@ class ClassroomMonitorApp:
                 if pid not in active_ids:
                     self._draw_box(frame, p_bbox, p_label, (80, 140, 200))
 
-            # Panel is drawn on display_frame after resize (bottom-right, sharp text).
-
-            for inc in incidents_to_record:
-                inc.snapshot_path = self.reporter.save_incident_snapshot(frame, inc, [inc.bbox])
-                self.reporter.record_incident(inc)
-
             frame_count += 1
 
             if writer is not None:
@@ -542,9 +310,6 @@ class ClassroomMonitorApp:
 
             if self.cfg.runtime.stop_after_seconds > 0 and (now_ts - start_ts) >= self.cfg.runtime.stop_after_seconds:
                 break
-
-        face_det.close()
-        face_mesh.close()
 
         if writer is not None:
             writer.release()

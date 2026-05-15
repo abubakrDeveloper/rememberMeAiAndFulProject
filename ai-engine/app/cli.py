@@ -1,9 +1,33 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import urllib.request
+from pathlib import Path
 
 from .config import AppConfig, load_config
-from .processor import ClassroomMonitorApp
+from .processor import ClassroomMonitorApp, _YUNET_MODEL_PATH
+
+_YUNET_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/"
+    "face_detection_yunet/face_detection_yunet_2023mar.onnx"
+)
+
+
+def _ensure_yunet_model() -> None:
+    model_path = Path(_YUNET_MODEL_PATH)
+    if model_path.exists():
+        return
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading YuNet face detection model to {model_path} ...")
+    try:
+        urllib.request.urlretrieve(_YUNET_URL, model_path)
+        print("Download complete.")
+    except Exception as exc:
+        print(f"ERROR: Could not download YuNet model: {exc}", file=sys.stderr)
+        print(f"Please manually download it from:\n  {_YUNET_URL}", file=sys.stderr)
+        print(f"and place it at: {model_path}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,7 +65,10 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    _ensure_yunet_model()
+
     cfg = load_config(args.config)
+    cfg = apply_overrides(cfg, args)
     cfg = apply_overrides(cfg, args)
 
     app = ClassroomMonitorApp(cfg)
