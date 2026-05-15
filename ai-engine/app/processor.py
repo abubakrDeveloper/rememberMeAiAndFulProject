@@ -38,6 +38,60 @@ class ClassroomMonitorApp:
         self._known_teachers: List[PersonRecord] = []
 
     @staticmethod
+    def _nms_boxes(
+        boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.35
+    ) -> List[Tuple[int, int, int, int]]:
+        if not boxes:
+            return []
+        sorted_boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)
+        kept: List[Tuple[int, int, int, int]] = []
+        for box in sorted_boxes:
+            x1, y1, w1, h1 = box
+            suppressed = False
+            for kx, ky, kw, kh in kept:
+                ix = max(x1, kx); iy = max(y1, ky)
+                ix2 = min(x1 + w1, kx + kw); iy2 = min(y1 + h1, ky + kh)
+                if ix2 <= ix or iy2 <= iy:
+                    continue
+                inter = (ix2 - ix) * (iy2 - iy)
+                union = w1 * h1 + kw * kh - inter
+                if union > 0 and inter / union > iou_threshold:
+                    suppressed = True
+                    break
+            if not suppressed:
+                kept.append(box)
+        return kept
+
+    @staticmethod
+    def _yunet_detect_scaled(
+        detector,
+        bgr: np.ndarray,
+        det_w: int,
+        frame_w: int,
+        frame_h: int,
+        min_px: int = 30,
+    ) -> List[Tuple[int, int, int, int]]:
+        """Run YuNet on a frame resized to det_w wide and scale boxes back to full res."""
+        scale = det_w / frame_w
+        det_h = int(frame_h * scale)
+        small = cv2.resize(bgr, (det_w, det_h), interpolation=cv2.INTER_AREA)
+        detector.setInputSize((det_w, det_h))
+        _, faces = detector.detect(small)
+        if faces is None:
+            return []
+        inv = 1.0 / scale
+        boxes: List[Tuple[int, int, int, int]] = []
+        for face in faces:
+            x = int(face[0] * inv); y = int(face[1] * inv)
+            w = int(face[2] * inv); h = int(face[3] * inv)
+            x = max(0, x); y = max(0, y)
+            w = min(w, frame_w - x); h = min(h, frame_h - y)
+            ar = w / h if h > 0 else 0
+            if w >= min_px and h >= min_px and 0.4 <= ar <= 2.5:
+                boxes.append((x, y, w, h))
+        return boxes
+
+    @staticmethod
     def _draw_box(frame: np.ndarray, bbox: Tuple[int, int, int, int], label: str, color: Tuple[int, int, int]) -> None:
         x, y, w, h = bbox
         cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
@@ -107,15 +161,18 @@ class ClassroomMonitorApp:
         last_process_ts = 0.0
         last_recognize_ts: float = -999.0  # controls 30-second recognition interval
         RECOGNIZE_INTERVAL = 30.0  # seconds between recognition runs per track
+        last_tiled_det_ts: float = -999.0   # controls tiled detection interval
+        TILED_DET_INTERVAL = 2.0            # seconds between expensive tiled passes
+        _cached_boxes: List[Tuple[int, int, int, int]] = []  # last tiled result
         # Persistent overlay: person_id -> (bbox, label, color, last_seen_ts)
         # Once a student is recognized we keep drawing their box every frame,
         # dimmed when not actively detected in the current frame.
         _seen_people: dict = {}
         # Option B: per-track vote buffer — identity locked only after VOTE_NEEDED agreements
         _vote_buffer: Dict[int, Dict[str, int]] = {}
-        VOTE_NEEDED = 5
-        # Option C: distance must be this good (score = 1-dist) to count toward attendance
-        ATTEND_MIN_SCORE = 0.40  # corresponds to recognition distance ≤ 0.60
+        VOTE_NEEDED = 10
+        # Option C: distance must be this good (cosine similarity) to count toward attendance
+        ATTEND_MIN_SCORE = 0.65
         # Stale box TTL: stop drawing a last-known-position box after this many seconds
         STALE_BOX_TTL = 5.0
 
@@ -133,7 +190,7 @@ class ClassroomMonitorApp:
             (640, 640),
             score_threshold=self.cfg.detection.min_detection_confidence,
             nms_threshold=0.3,
-            top_k=self.cfg.detection.max_faces,
+            top_k=max(self.cfg.detection.max_faces, 50),
         )
 
         while True:
@@ -156,41 +213,70 @@ class ClassroomMonitorApp:
             if run_recognition:
                 last_recognize_ts = now_ts
 
-            # --- Face detection via YuNet ---
-            face_detector.setInputSize((w_frame, h_frame))
-            boxes: List[Tuple[int, int, int, int]] = []
-            try:
-                _, faces = face_detector.detect(frame)
-                if faces is not None:
-                    for face in faces:
-                        x, y, w, h = int(face[0]), int(face[1]), int(face[2]), int(face[3])
-                        x = max(0, x); y = max(0, y)
-                        w = min(w, w_frame - x); h = min(h, h_frame - y)
-                        ar = w / h if h > 0 else 0
-                        if w >= 50 and h >= 50 and 0.4 <= ar <= 2.5:
-                            boxes.append((x, y, w, h))
-            except Exception as exc:  # noqa: BLE001
-                print(f"[frame {frame_count}] FaceDetection error: {exc}")
+            # --- Face detection: two-tier strategy (mirrors the old MediaPipe approach) ---
+            # Fast path (every frame): single 960px-wide pass — keeps tracker alive.
+            # Slow path (every 2s): 2×2 tiled pass at 960px per tile — finds small/
+            #   angled faces that the single-pass misses at the back of the room.
+            _DET_W = 960
+
+            single_boxes = self._yunet_detect_scaled(
+                face_detector, frame, _DET_W, w_frame, h_frame
+            )
+
+            if now_ts - last_tiled_det_ts >= TILED_DET_INTERVAL:
+                last_tiled_det_ts = now_ts
+                tiled: List[Tuple[int, int, int, int]] = []
+                tile_w = int(w_frame * 0.60)
+                tile_h = int(h_frame * 0.60)
+                stride_x = w_frame - tile_w
+                stride_y = h_frame - tile_h
+                for row in range(2):
+                    for col in range(2):
+                        ox = col * stride_x
+                        oy = row * stride_y
+                        x2 = min(w_frame, ox + tile_w)
+                        y2 = min(h_frame, oy + tile_h)
+                        tile_bgr = frame[oy:y2, ox:x2]
+                        tw, th = tile_bgr.shape[1], tile_bgr.shape[0]
+                        if tw < 20 or th < 20:
+                            continue
+                        tile_boxes = self._yunet_detect_scaled(
+                            face_detector, tile_bgr, _DET_W, tw, th
+                        )
+                        for bx, by, bw, bh in tile_boxes:
+                            tiled.append((ox + bx, oy + by, bw, bh))
+                _cached_boxes = self._nms_boxes(tiled)
+
+            boxes = self._nms_boxes(single_boxes + _cached_boxes)
 
             # --- track faces (always runs to keep bboxes accurate) ---
             tracks = self.tracker.update(boxes, now_ts)
 
             for track in tracks:
                 x, y, w, h = track.bbox
-                if w < 50 or h < 50:
+                if w < 30 or h < 30:
                     continue
 
                 # --- Recognition: only when interval has elapsed OR track not yet locked ---
                 if run_recognition or not track.person_id:
-                    x1 = max(0, x)
-                    y1 = max(0, y)
-                    x2 = min(w_frame, x + w)
-                    y2 = min(h_frame, y + h)
+                    # Pad the YuNet box so MTCNN has context around the face.
+                    _PAD = max(20, int(min(w, h) * 0.15))
+                    x1 = max(0, x - _PAD)
+                    y1 = max(0, y - _PAD)
+                    x2 = min(w_frame, x + w + _PAD)
+                    y2 = min(h_frame, y + h + _PAD)
                     face_rgb = rgb[y1:y2, x1:x2]
                     if face_rgb.size == 0:
                         continue
 
-                    person, score = self.face_db.match(face_rgb)
+                    _emb = self.face_db.encode(face_rgb)
+                    if _emb is not None:
+                        person, score = self.face_db.match_embedding(_emb)
+                        if person is None:
+                            # Enrollment match failed — try re-ID against confirmed recent frames
+                            person, score = self.face_db.reid_match(_emb)
+                    else:
+                        person, score = None, 0.0
                     if person:
                         # Option B: accumulate votes; lock identity only after VOTE_NEEDED agreements
                         if not track.person_id:
@@ -206,6 +292,9 @@ class ClassroomMonitorApp:
                         # Identity confirmed (locked now or was locked before)
                         if track.person_id and not track.person_id.startswith("unknown_"):
                             person = self.face_db._records.get(track.person_id, person)
+                            # Feed confirmed-frame embedding into re-ID gallery
+                            if _emb is not None:
+                                self.face_db.update_gallery(track.person_id, _emb)
                             # Option C: mark attendance only for strong matches
                             if (self.cfg.runtime.app_mode == "classroom"
                                     and score >= ATTEND_MIN_SCORE):

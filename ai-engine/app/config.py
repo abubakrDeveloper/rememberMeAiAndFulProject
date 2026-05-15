@@ -17,7 +17,7 @@ class SourceConfig:
 class DetectionConfig:
     min_detection_confidence: float = 0.5
     max_faces: int = 20
-    recognition_tolerance: float = 0.5
+    recognition_tolerance: float = 0.20  # cosine similarity threshold = 1 - tolerance = 0.80
 
 
 @dataclass
