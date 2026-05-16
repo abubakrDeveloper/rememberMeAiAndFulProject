@@ -2,16 +2,18 @@
 
 **rememberMe** is a face-recognition-based classroom monitoring system for schools and colleges, built on Python 3.11. It runs on live camera streams, RTSP feeds, or pre-recorded MP4 files and produces structured attendance and behavior reports.
 
+---
+
 ## Features
 
-**Attendance tracking**
+### AI Engine (Python)
 
+**Attendance tracking**
 - Per-student and per-teacher present/absent determination
 - Configurable minimum confirmation frames before marking a person present
-- Confidence bands (low / medium / high) on all attendance and incident records
+- Confidence bands (low / medium / high) on all records
 
 **Behavior detection** (classroom mode)
-
 - States: focused, distracted, sleeping, possible phone use
 - Eye Aspect Ratio (EAR) via MediaPipe Face Mesh for sleep detection
 - Head-yaw estimation for distraction detection
@@ -19,37 +21,43 @@
 - Per-incident cooldown to suppress duplicate alerts
 
 **Video input**
-
 - MP4 / video file playback
 - RTSP stream with automatic reconnect
 - Webcam (by index)
 
 **Reporting and output**
-
 - CSV exports: student attendance, teacher attendance, incidents
 - Session summary JSON for dashboard or external integration
 - Incident screenshots saved to `output/snapshots/` with distracted faces highlighted in red
 - Optional annotated video export
 - Automatic 3-day retention cleanup of old reports and snapshots
 
-**Admin dashboard**
-
-- Local HTTP server (`admin_dashboard.py`) serving `dashboard/index.html`
-- Browse latest reports, view snapshots, download CSVs
-- Audit log (`audit_log.jsonl`) records every dashboard view, report download, and email event
-
 **Email notifications**
-
 - Optional SMTP email to the admin with the session summary (TLS supported)
+
+### REST API (Node.js)
+
+- **Auth**: sign-up and sign-in with JWT and bcrypt password hashing
+- **Users**: role-based model — `Student`, `Teacher`, `Admin` — with optional face image field
+- **Attendance**: per-user records with status (`Present`, `Absent`, `Late`, `Excused`), group, lesson order, and AI capture image
+- **Groups**: department/course groups with lifecycle status (`Active`, `Graduated`, `Inactive`)
+- **Static file serving**: uploaded face images served from `/uploads`
+
+### Admin Dashboard (HTML)
+
+- Attendance cards and student/teacher attendance tables
+- Incident distribution bars and snapshot gallery
+- Camera online/offline status and last-frame timestamp
+- Filters: date, class, incident type, attendance status, name/ID search
+- Audit log table
 
 ---
 
 ## Requirements
 
+### AI Engine
 - Python 3.11
 - A camera, RTSP stream, or MP4 file
-
-Dependencies (installed via `requirements.txt`):
 
 | Package | Purpose |
 |---|---|
@@ -58,36 +66,45 @@ Dependencies (installed via `requirements.txt`):
 | `face_recognition` + `dlib` | 128-d face embeddings and recognition |
 | `numpy` | Numerical operations |
 
+### REST API
+- Node.js 18+
+- MongoDB instance (local or Atlas)
+
+| Package | Purpose |
+|---|---|
+| `express` | HTTP server and routing |
+| `mongoose` | MongoDB ODM |
+| `jsonwebtoken` | JWT auth tokens |
+| `bcrypt` / `bcryptjs` | Password hashing |
+| `dotenv` | Environment variable loading |
+| `cors` | Cross-origin resource sharing |
+
 ---
 
 ## Setup
 
-**1. Create a virtual environment (Windows PowerShell)**
+### 1. AI Engine
+
+**Create a virtual environment (Windows PowerShell)**
 
 ```powershell
+cd ai-engine
 py -3.11 -m venv .venv311
 .\.venv311\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-**2. Add roster images**
+**Add roster images**
 
 ```
 roster/
-  students/    ← student face images
-  teachers/    ← teacher face images
+  students/    ← student face images  (e.g. S001_Ali_Khan.jpg)
+  teachers/    ← teacher face images  (e.g. T001_Ms_Sara.jpg)
 ```
 
-Filename format:
+Filename format: `<ID>_<Name>.jpg` — the app detects the largest face in each image and stores a 128-d embedding.
 
-- `S001_Ali_Khan.jpg` — student (ID underscore name)
-- `T001_Ms_Sara.jpg`  — teacher (ID underscore name)
-
-The app detects the largest face in each image and stores a 128-d embedding.
-
-**3. Edit `config.json`**
-
-Key sections:
+**Edit `config.json`**
 
 | Section | Purpose |
 |---|---|
@@ -99,22 +116,38 @@ Key sections:
 | `session` | Institute name, class name, teacher ID, admin name |
 | `admin_email` | SMTP credentials and toggle |
 
+### 2. REST API
+
+```bash
+cd server
+npm install
+```
+
+Create a `.env` file in `server/`:
+
+```env
+MONGO_URI=mongodb://localhost:27017/rememberme
+JWT_SECRET=your_jwt_secret_here
+PORT=4000
+```
+
 ---
 
 ## Running
 
+### AI Engine
+
 **Quick launcher (Windows)**
 
 ```bat
+cd ai-engine
 run.bat
 ```
-
-Presents an interactive menu to pick mode and source.
 
 **Command line**
 
 ```bash
-# Classroom mode — default config
+# Classroom mode
 py -3.11 main.py --config config.json
 
 # General face recognition mode
@@ -132,17 +165,29 @@ Press `q` to quit when the display window is open.
 **Admin dashboard**
 
 ```bash
-py -3.11 admin_dashboard.py
+py -3.11 admin_dashboard.py --open-browser
+# Custom port:
+py -3.11 admin_dashboard.py --port 9000 --open-browser
 ```
 
-Opens the dashboard in the default browser at `http://localhost:8000`.
+Opens at `http://127.0.0.1:8765`.
+
+### REST API
+
+```bash
+cd server
+npm start          # production
+npm run dev        # development (nodemon)
+```
+
+Server starts on `http://localhost:4000`.
 
 ---
 
 ## Output
 
 ```
-output/
+ai-engine/output/
   attendance_students_<timestamp>.csv
   attendance_teachers_<timestamp>.csv
   incidents_<timestamp>.csv
@@ -154,49 +199,11 @@ output/
 
 ---
 
-## 6) Tiny Admin Dashboard (HTML)
+## Retention Policy
 
-This project includes a tiny desktop dashboard page that reads latest CSV and JSON outputs and shows:
-- Attendance cards
-- Student and teacher attendance tables
-- Incident distribution bars
-- Incident snapshots gallery
-- Camera online/offline, last frame timestamp, and reconnect status
-- Filters: date, class, incident type, attendance status, and name/ID search
-- Audit log table
-
-Run dashboard server:
-
-```bash
-.\.venv311\Scripts\python.exe admin_dashboard.py --open-browser
-```
-
-If you want a custom port:
-
-```bash
-.\.venv311\Scripts\python.exe admin_dashboard.py --port 9000 --open-browser
-```
-
-Then open:
-
-```text
-http://127.0.0.1:8765
-```
-
-The dashboard reads the newest files in `output/`:
-- `attendance_students_*.csv`
-- `attendance_teachers_*.csv`
-- `incidents_*.csv`
-- `summary_*.json`
-
-Also generated in `output/`:
-- `audit_log.jsonl` (view/report/email audit events)
-
-## 7) Retention Policy
-
-On each run, files older than 3 days are automatically deleted:
-- snapshots in `output/snapshots/`
-- report files in `output/` (`attendance_*.csv`, `incidents_*.csv`, `summary_*.json`, `annotated_*.mp4`)
+On each AI engine run, files older than 3 days are automatically deleted:
+- Snapshots in `output/snapshots/`
+- Report files: `attendance_*.csv`, `incidents_*.csv`, `summary_*.json`, `annotated_*.mp4`
 
 ## 8) Reducing False Alerts
 
