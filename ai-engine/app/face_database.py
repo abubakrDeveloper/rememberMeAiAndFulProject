@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -12,6 +13,8 @@ from numpy.linalg import norm as np_norm
 from PIL import Image
 
 from .types import PersonRecord
+
+logger = logging.getLogger(__name__)
 
 
 class FaceDatabase:
@@ -112,12 +115,12 @@ class FaceDatabase:
             img_buf = np.fromfile(str(file_path), dtype=np.uint8)
             img = cv2.imdecode(img_buf, cv2.IMREAD_COLOR)
             if img is None:
-                print(f"  skip {file_path.name}: could not read image")
+                logger.warning("  skip %s: could not read image", file_path.name)
                 continue
             face_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             enc = self._encode(face_rgb)
             if enc is None:
-                print(f"  skip {file_path.name}: no face found")
+                logger.warning("  skip %s: no face found", file_path.name)
                 continue
             person = self._parse_person(file_path, role)
             self._records[person.person_id] = person

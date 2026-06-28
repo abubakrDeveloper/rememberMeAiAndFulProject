@@ -61,10 +61,11 @@
 
 | Package | Purpose |
 |---|---|
-| `opencv-python` / `opencv-contrib-python` | Video capture and frame processing |
-| `mediapipe` | Face detection, Face Mesh, landmark extraction |
-| `face_recognition` + `dlib` | 128-d face embeddings and recognition |
+| `opencv-python` / `opencv-contrib-python` | Video capture, frame processing, YuNet face detection |
+| `facenet-pytorch` | FaceNet InceptionResnetV1 for 512-d face embeddings + MTCNN |
+| `torch` | PyTorch runtime for facenet-pytorch inference |
 | `numpy` | Numerical operations |
+| `Pillow` | Image loading and resizing for FaceNet input |
 
 ### REST API
 - Node.js 18+

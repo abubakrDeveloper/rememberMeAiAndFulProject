@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import urllib.request
 from pathlib import Path
@@ -13,20 +14,22 @@ _YUNET_URL = (
     "face_detection_yunet/face_detection_yunet_2023mar.onnx"
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _ensure_yunet_model() -> None:
     model_path = Path(_YUNET_MODEL_PATH)
     if model_path.exists():
         return
     model_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading YuNet face detection model to {model_path} ...")
+    logger.info("Downloading YuNet face detection model to %s ...", model_path)
     try:
         urllib.request.urlretrieve(_YUNET_URL, model_path)
-        print("Download complete.")
+        logger.info("Download complete.")
     except Exception as exc:
-        print(f"ERROR: Could not download YuNet model: {exc}", file=sys.stderr)
-        print(f"Please manually download it from:\n  {_YUNET_URL}", file=sys.stderr)
-        print(f"and place it at: {model_path}", file=sys.stderr)
+        logger.error("Could not download YuNet model: %s", exc)
+        logger.error("Please manually download it from:\n  %s", _YUNET_URL)
+        logger.error("and place it at: %s", model_path)
         raise SystemExit(1)
 
 
@@ -62,13 +65,18 @@ def apply_overrides(cfg: AppConfig, args: argparse.Namespace) -> AppConfig:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     parser = build_parser()
     args = parser.parse_args()
 
     _ensure_yunet_model()
 
     cfg = load_config(args.config)
-    cfg = apply_overrides(cfg, args)
     cfg = apply_overrides(cfg, args)
 
     app = ClassroomMonitorApp(cfg)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,8 @@ from .reporting import Reporter
 from .tracking import CentroidTracker
 from .types import PersonRecord
 from .video import VideoInput
+
+logger = logging.getLogger(__name__)
 
 _YUNET_MODEL_PATH = "models/face_detection_yunet_2023mar.onnx"
 
@@ -134,9 +137,9 @@ class ClassroomMonitorApp:
         if self.cfg.runtime.app_mode != "classroom":
             roster_dir = self.cfg.paths.roster_dir
             stats = self.face_db.load_people_dir(roster_dir)
-            print(f"Roster loaded | people={stats['people']}")
+            logger.info("Roster loaded | people=%d", stats['people'])
             if not self.face_db.has_people():
-                print("Warning: no roster faces loaded — all faces will show as Unknown.")
+                logger.warning("No roster faces loaded — all faces will show as Unknown.")
             return
 
         stats = self.face_db.load(
@@ -145,12 +148,12 @@ class ClassroomMonitorApp:
         )
         self._known_students = self.face_db.list_people("student")
         self._known_teachers = self.face_db.list_people("teacher")
-        print(
-            f"Roster loaded | students={stats['students']} "
-            f"teachers={stats['teachers']} people={stats['people']}"
+        logger.info(
+            "Roster loaded | students=%d teachers=%d people=%d",
+            stats['students'], stats['teachers'], stats['people'],
         )
         if not self.face_db.has_people():
-            print("Warning: no roster faces loaded — attendance won't work.")
+            logger.warning("No roster faces loaded — attendance won't work.")
 
     def run(self) -> None:
         self._load_roster()
@@ -159,6 +162,7 @@ class ClassroomMonitorApp:
         frame_count = 0
         start_ts = time.time()
         last_process_ts = 0.0
+        _fps_report_ts = start_ts  # for periodic FPS logging
         last_recognize_ts: float = -999.0  # controls 30-second recognition interval
         RECOGNIZE_INTERVAL = 30.0  # seconds between recognition runs per track
         last_tiled_det_ts: float = -999.0   # controls tiled detection interval
@@ -200,6 +204,13 @@ class ClassroomMonitorApp:
         while True:
             ok, frame = self.video.read()
             if not ok or frame is None:
+                # File mode: False means EOF — exit the loop.
+                # Live/webcam mode: False means no new frame yet (buffer
+                # was already consumed or capture thread is reconnecting).
+                # Sleep briefly and retry instead of exiting.
+                if self.cfg.source.mode != "file":
+                    time.sleep(0.01)
+                    continue
                 break
 
             now_ts = time.time()
@@ -389,6 +400,14 @@ class ClassroomMonitorApp:
 
             frame_count += 1
 
+            # Periodic FPS counter (every 100 frames)
+            if frame_count % 100 == 0:
+                elapsed = now_ts - _fps_report_ts
+                if elapsed > 0:
+                    logger.info("FPS: %.1f  (frames %d, elapsed %.1fs)",
+                                100.0 / elapsed, frame_count, now_ts - start_ts)
+                _fps_report_ts = now_ts
+
             if writer is not None:
                 writer.write(frame)
 
@@ -439,10 +458,11 @@ class ClassroomMonitorApp:
                 students, teachers, self.cfg.source.source, camera_health,
             )
 
-            print(f"\nProcessed {frame_count} frames")
-            print(f"  Students present : {sum(1 for s in students if s.status == 'present')}/{len(students)}")
-            print(f"  Incidents logged : {len(self.reporter._incident_log)}")
-            print(f"  Reports saved to : {self.cfg.paths.output_dir}/")
+            logger.info("Processed %d frames", frame_count)
+            logger.info("  Students present : %d/%d",
+                        sum(1 for s in students if s.status == 'present'), len(students))
+            logger.info("  Incidents logged : %d", len(self.reporter._incident_log))
+            logger.info("  Reports saved to : %s/", self.cfg.paths.output_dir)
 
             if self.cfg.admin_email.enabled:
                 attachments = [student_csv, teacher_csv, incident_csv, summary_path]
@@ -453,11 +473,11 @@ class ClassroomMonitorApp:
                     attachments=attachments,
                 )
 
-            print("Processing completed.")
-            print(f"  Student attendance : {student_csv}")
-            print(f"  Teacher attendance : {teacher_csv}")
-            print(f"  Incidents          : {incident_csv}")
-            print(f"  Summary            : {summary_path}")
+            logger.info("Processing completed.")
+            logger.info("  Student attendance : %s", student_csv)
+            logger.info("  Teacher attendance : %s", teacher_csv)
+            logger.info("  Incidents          : %s", incident_csv)
+            logger.info("  Summary            : %s", summary_path)
         else:
-            print(f"\nProcessed {frame_count} frames")
-            print("Processing completed.")
+            logger.info("Processed %d frames", frame_count)
+            logger.info("Processing completed.")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Optional, Tuple
@@ -8,6 +9,8 @@ import cv2
 import numpy as np
 
 from .config import SourceConfig
+
+logger = logging.getLogger(__name__)
 
 
 class VideoInput:
@@ -23,6 +26,7 @@ class VideoInput:
         # Async capture (live/webcam only)
         self._lock = threading.Lock()
         self._buffer: Optional[np.ndarray] = None
+        self._new_frame = threading.Event()
         self._stopped: bool = False
         self._thread: Optional[threading.Thread] = None
 
@@ -67,12 +71,14 @@ class VideoInput:
             if ok:
                 with self._lock:
                     self._buffer = frame
+                    self._new_frame.set()
                 self.last_frame_ts = time.time()
                 self.status = "online"
                 self.last_error = ""
             else:
                 self.status = "offline"
                 self.last_error = "Live stream read failed, reconnecting"
+                logger.warning("Live stream read failed, attempting reconnect...")
                 if self.cap is not None:
                     self.cap.release()
                     self.cap = None
@@ -81,16 +87,20 @@ class VideoInput:
                 time.sleep(max(0.5, self.cfg.reconnect_seconds))
                 try:
                     self._open_cap()
+                    self.reconnect_successes += 1
+                    logger.info("Reconnect successful (attempt #%d)", self.reconnect_attempts)
                 except RuntimeError:
                     self.last_error = "Reconnect attempt failed"
+                    logger.error("Reconnect attempt #%d failed", self.reconnect_attempts)
                     time.sleep(1.0)
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
         """Return the latest frame.
 
         File mode: synchronous — each frame delivered once in order.
-        Live/webcam: returns immediately from the background capture buffer,
-        eliminating I/O stall from the main processing loop.
+        Live/webcam: returns the most recent frame from the background
+        capture buffer, then clears it so the same frame is never
+        processed twice.
         """
         if self.cfg.mode == "file":
             if self.cap is None:
@@ -105,9 +115,12 @@ class VideoInput:
             self.last_error = "Video file ended or frame read failed"
             return False, None
 
-        # Live/webcam — non-blocking: return whatever is in the capture buffer
+        # Live/webcam — non-blocking: return the latest frame and clear buffer
+        # so duplicate processing is avoided.
         with self._lock:
             frame = self._buffer
+            self._buffer = None
+            self._new_frame.clear()
         if frame is None:
             return False, None
         if self._stopped:
