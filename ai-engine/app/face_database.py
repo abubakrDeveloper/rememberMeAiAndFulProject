@@ -20,8 +20,11 @@ logger = logging.getLogger(__name__)
 class FaceDatabase:
     """Roster database using FaceNet-512 embeddings (cosine similarity matching)."""
 
-    def __init__(self, tolerance: float = 0.5) -> None:
-        self.tolerance = tolerance
+    def __init__(self, threshold: float = 0.35, margin: float = 0.15) -> None:
+        # Direct cosine-similarity gate: a match must score >= threshold AND beat the
+        # runner-up by >= margin. (Replaces the old inverted `tolerance` knob.)
+        self.threshold = threshold
+        self.margin = margin
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._mtcnn = MTCNN(image_size=160, margin=40, keep_all=False, device=device)
         self._resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
@@ -106,8 +109,10 @@ class FaceDatabase:
 
     def _load_role_dir(self, role_dir: Path, role: str) -> int:
         if not role_dir.exists():
+            logger.warning("Roster dir does not exist: %s", role_dir)
             return 0
         loaded = 0
+        skipped = 0
         for file_path in sorted(role_dir.glob("*")):
             if file_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".bmp"}:
                 continue
@@ -116,16 +121,27 @@ class FaceDatabase:
             img = cv2.imdecode(img_buf, cv2.IMREAD_COLOR)
             if img is None:
                 logger.warning("  skip %s: could not read image", file_path.name)
+                skipped += 1
                 continue
             face_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             enc = self._encode(face_rgb)
             if enc is None:
                 logger.warning("  skip %s: no face found", file_path.name)
+                skipped += 1
                 continue
             person = self._parse_person(file_path, role)
+            # Warn on ID collisions so a silent identity merge never goes unnoticed.
+            existing = self._records.get(person.person_id)
+            if existing is not None and existing.name != person.name:
+                logger.warning(
+                    "  duplicate person_id %s: '%s' (%s) overwrites '%s' (%s) from %s",
+                    person.person_id, person.name, role, existing.name, existing.role,
+                    file_path.name,
+                )
             self._records[person.person_id] = person
             self._encodings.setdefault(person.person_id, []).append(enc)
             loaded += 1
+        logger.info("  %s: enrolled=%d skipped=%d (dir=%s)", role, loaded, skipped, role_dir)
         return loaded
 
     def load(self, students_dir: str, teachers_dir: str, **_) -> Dict[str, int]:
@@ -160,8 +176,8 @@ class FaceDatabase:
     def match_embedding(self, embedding: np.ndarray) -> Tuple[Optional[PersonRecord], float]:
         """Match a pre-computed embedding against the enrollment roster.
 
-        Returns (PersonRecord, score) only when the winner beats the threshold
-        (1 - tolerance = 0.80) AND clears the runner-up by at least MARGIN (0.15).
+        Returns (PersonRecord, score) only when the winner's cosine similarity is
+        >= self.threshold AND clears the runner-up by at least self.margin.
         Uses a pre-cached matrix for a single vectorised dot-product pass.
         """
         if self._enroll_matrix is None or not self._enroll_pids:
@@ -180,9 +196,7 @@ class FaceDatabase:
         best_id, best_sim = ranked[0]
         second_sim = ranked[1][1] if len(ranked) > 1 else -1.0
 
-        MARGIN = 0.15
-        threshold = 1.0 - self.tolerance  # 0.80 with default tolerance=0.20
-        if best_sim >= threshold and (best_sim - second_sim) >= MARGIN and best_id in self._records:
+        if best_sim >= self.threshold and (best_sim - second_sim) >= self.margin and best_id in self._records:
             return self._records[best_id], best_sim
         return None, best_sim
 

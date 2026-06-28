@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import Optional, Tuple
@@ -29,6 +30,8 @@ class VideoInput:
         self._new_frame = threading.Event()
         self._stopped: bool = False
         self._thread: Optional[threading.Thread] = None
+        # Staleness watchdog: warn once when the feed goes stale, reset on recovery.
+        self._stale_warned: bool = False
 
     def _resolve_source(self):
         if self.cfg.mode == "webcam":
@@ -41,21 +44,58 @@ class VideoInput:
     def _open_cap(self) -> None:
         """Open the underlying VideoCapture without starting a thread."""
         src = self._resolve_source()
-        self.cap = cv2.VideoCapture(src)
+        if self.cfg.mode == "rtsp":
+            # Force TCP transport — avoids the corrupted/green frames seen with the
+            # default UDP on real CCTV networks.
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+            # 5s open/read timeouts so a stalled link fails fast (and the reconnect
+            # loop kicks in) instead of hanging on OpenCV's 30s default. These must
+            # be passed as construction params, not via the env var above.
+            _RTSP_TIMEOUT_MS = 5000
+            self.cap = cv2.VideoCapture(
+                src,
+                cv2.CAP_FFMPEG,
+                [
+                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, _RTSP_TIMEOUT_MS,
+                    cv2.CAP_PROP_READ_TIMEOUT_MSEC, _RTSP_TIMEOUT_MS,
+                ],
+            )
+        else:
+            self.cap = cv2.VideoCapture(src)
         if not self.cap.isOpened():
             self.status = "offline"
             self.last_error = f"Unable to open source: {self.cfg.source}"
             raise RuntimeError(f"Unable to open source: {self.cfg.source}")
+        if self.cfg.mode == "rtsp":
+            # Keep only the latest frame in the driver buffer to minimize latency.
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.status = "online"
         self.last_error = ""
 
     def open(self) -> None:
-        """Open capture and, for live/webcam streams, start a background read thread."""
-        self._open_cap()
-        if self.cfg.mode != "file":
-            self._stopped = False
-            self._thread = threading.Thread(target=self._capture_loop, daemon=True)
-            self._thread.start()
+        """Open capture and, for live/webcam streams, start a background read thread.
+
+        For live modes an initial connection failure is non-fatal: the capture
+        thread is started anyway and its reconnect logic keeps retrying until the
+        camera appears, so a brief blip at launch never crashes the app. File mode
+        still raises on failure (a missing file is a real error).
+        """
+        if self.cfg.mode == "file":
+            self._open_cap()
+            return
+
+        try:
+            self._open_cap()
+        except RuntimeError:
+            self.status = "offline"
+            self.last_error = "Initial connection failed, retrying in background"
+            logger.warning(
+                "Could not open live source on first attempt; capture thread will "
+                "keep reconnecting: %s", self.cfg.source,
+            )
+        self._stopped = False
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.start()
 
     def _capture_loop(self) -> None:
         """Background thread: continuously fills _buffer with the latest camera frame.
@@ -63,7 +103,20 @@ class VideoInput:
         Handles reconnection automatically so the main processing loop never blocks
         on network I/O for RTSP or webcam sources.
         """
+        stale_after = max(5.0, 2.0 * self.cfg.reconnect_seconds)
         while not self._stopped:
+            # Watchdog: warn once if the feed has been stale beyond the threshold,
+            # so an operator sees a stalled camera during a live session.
+            if (
+                self.last_frame_ts > 0.0
+                and not self._stale_warned
+                and time.time() - self.last_frame_ts > stale_after
+            ):
+                logger.warning(
+                    "No fresh frame for %.1fs — live feed appears stalled.",
+                    time.time() - self.last_frame_ts,
+                )
+                self._stale_warned = True
             if self.cap is None:
                 time.sleep(0.05)
                 continue
@@ -75,6 +128,7 @@ class VideoInput:
                 self.last_frame_ts = time.time()
                 self.status = "online"
                 self.last_error = ""
+                self._stale_warned = False
             else:
                 self.status = "offline"
                 self.last_error = "Live stream read failed, reconnecting"

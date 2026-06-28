@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import cv2
 
 from .config import AdminEmailConfig, SessionConfig
+from .scoring import confidence_band
 from .types import AttendanceEntry, Incident
 
 
@@ -34,14 +35,6 @@ class Reporter:
         self.audit_log_path = self.output_dir / "audit_log.jsonl"
         self._incident_log: List[Incident] = []
         self.cleanup_old_files()
-
-    @staticmethod
-    def _confidence_band(score: float) -> str:
-        if score >= 0.75:
-            return "high"
-        if score >= 0.4:
-            return "medium"
-        return "low"
 
     def _append_audit(self, event: str, details: Dict[str, Any]) -> None:
         record = {
@@ -150,7 +143,7 @@ class Reporter:
                         item.role,
                         self.session.class_name,
                         f"{item.confidence:.3f}",
-                        self._confidence_band(item.confidence),
+                        confidence_band(item.confidence),
                         item.track_id,
                         list(item.bbox),
                         item.snapshot_path,
