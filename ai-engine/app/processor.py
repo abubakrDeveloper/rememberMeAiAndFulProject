@@ -13,9 +13,11 @@ from .attendance import AttendanceManager
 from .config import AppConfig
 from .face_database import FaceDatabase
 from .reporting import Reporter
-from .tracking import CentroidTracker
+from .tracking import ByteTrackTracker
 from .types import PersonRecord
 from .video import VideoInput
+
+ScoredDet = Tuple[Tuple[int, int, int, int], float]
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +28,14 @@ class ClassroomMonitorApp:
     def __init__(self, config: AppConfig) -> None:
         self.cfg = config
 
-        self.face_db = FaceDatabase(tolerance=self.cfg.detection.recognition_tolerance)
+        self.face_db = FaceDatabase(
+            threshold=self.cfg.detection.recognition_threshold,
+            margin=self.cfg.detection.recognition_margin,
+        )
         self.attendance = AttendanceManager(min_confirm_frames=self.cfg.attendance.min_confirm_frames)
-        self.tracker = CentroidTracker(max_distance=80)
+        self.tracker = ByteTrackTracker(
+            high_score=max(0.6, self.cfg.detection.min_detection_confidence + 0.1),
+        )
         self.video = VideoInput(self.cfg.source)
         self.reporter = Reporter(
             output_dir=self.cfg.paths.output_dir,
@@ -42,16 +49,17 @@ class ClassroomMonitorApp:
 
     @staticmethod
     def _nms_boxes(
-        boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.35
-    ) -> List[Tuple[int, int, int, int]]:
+        boxes: List[ScoredDet], iou_threshold: float = 0.35
+    ) -> List[ScoredDet]:
         if not boxes:
             return []
-        sorted_boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)
-        kept: List[Tuple[int, int, int, int]] = []
-        for box in sorted_boxes:
+        # Sort by detection score so the strongest detection wins each overlap.
+        sorted_boxes = sorted(boxes, key=lambda b: b[1], reverse=True)
+        kept: List[ScoredDet] = []
+        for box, score in sorted_boxes:
             x1, y1, w1, h1 = box
             suppressed = False
-            for kx, ky, kw, kh in kept:
+            for (kx, ky, kw, kh), _ks in kept:
                 ix = max(x1, kx); iy = max(y1, ky)
                 ix2 = min(x1 + w1, kx + kw); iy2 = min(y1 + h1, ky + kh)
                 if ix2 <= ix or iy2 <= iy:
@@ -62,7 +70,7 @@ class ClassroomMonitorApp:
                     suppressed = True
                     break
             if not suppressed:
-                kept.append(box)
+                kept.append((box, score))
         return kept
 
     @staticmethod
@@ -73,8 +81,12 @@ class ClassroomMonitorApp:
         frame_w: int,
         frame_h: int,
         min_px: int = 30,
-    ) -> List[Tuple[int, int, int, int]]:
-        """Run YuNet on a frame resized to det_w wide and scale boxes back to full res."""
+    ) -> List[ScoredDet]:
+        """Run YuNet on a frame resized to det_w wide and scale boxes back to full res.
+
+        Returns ((x, y, w, h), score) — the YuNet confidence is kept so the tracker
+        can do ByteTrack-style two-stage association.
+        """
         scale = det_w / frame_w
         det_h = int(frame_h * scale)
         small = cv2.resize(bgr, (det_w, det_h), interpolation=cv2.INTER_AREA)
@@ -83,22 +95,69 @@ class ClassroomMonitorApp:
         if faces is None:
             return []
         inv = 1.0 / scale
-        boxes: List[Tuple[int, int, int, int]] = []
+        boxes: List[ScoredDet] = []
         for face in faces:
             x = int(face[0] * inv); y = int(face[1] * inv)
             w = int(face[2] * inv); h = int(face[3] * inv)
             x = max(0, x); y = max(0, y)
             w = min(w, frame_w - x); h = min(h, frame_h - y)
             ar = w / h if h > 0 else 0
+            score = float(face[-1])
             if w >= min_px and h >= min_px and 0.4 <= ar <= 2.5:
-                boxes.append((x, y, w, h))
+                boxes.append(((x, y, w, h), score))
         return boxes
 
     @staticmethod
-    def _draw_box(frame: np.ndarray, bbox: Tuple[int, int, int, int], label: str, color: Tuple[int, int, int]) -> None:
+    def _draw_box(
+        frame: np.ndarray,
+        bbox: Tuple[int, int, int, int],
+        label: str,
+        color: Tuple[int, int, int],
+        dimmed: bool = False,
+    ) -> None:
+        """Draw a corner-bracket box with a filled, readable label chip.
+
+        `dimmed` is used for last-known-position boxes (person not detected this
+        frame): thinner brackets, no chip background, so they read as "stale".
+        """
         x, y, w, h = bbox
-        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(frame, label, (x, max(y - 8, 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        if w <= 0 or h <= 0:
+            return
+        x2, y2 = x + w, y + h
+        # Bracket length and thickness scale with box size for consistent weight.
+        ln = max(8, int(min(w, h) * 0.22))
+        thick = 1 if dimmed else max(2, int(round(min(w, h) / 80)) + 1)
+
+        def corner(p1, p2, p3):
+            cv2.line(frame, p1, p2, color, thick, cv2.LINE_AA)
+            cv2.line(frame, p1, p3, color, thick, cv2.LINE_AA)
+
+        corner((x, y), (x + ln, y), (x, y + ln))            # top-left
+        corner((x2, y), (x2 - ln, y), (x2, y + ln))         # top-right
+        corner((x, y2), (x + ln, y2), (x, y2 - ln))         # bottom-left
+        corner((x2, y2), (x2 - ln, y2), (x2, y2 - ln))      # bottom-right
+
+        if not label:
+            return
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        fscale = 0.5
+        fthick = 1
+        (tw, th), base = cv2.getTextSize(label, font, fscale, fthick)
+        pad = 4
+        chip_w = tw + 2 * pad
+        chip_h = th + base + 2 * pad
+        cx = x
+        cy = y - chip_h - 2
+        if cy < 0:  # not enough room above — drop chip just inside the top edge
+            cy = y + 2
+        if dimmed:
+            # No filled chip for stale boxes — just text, so they recede visually.
+            cv2.putText(frame, label, (cx + pad, cy + th + pad), font, fscale, color, fthick, cv2.LINE_AA)
+            return
+        # Filled chip background for readability on busy/dark frames.
+        cv2.rectangle(frame, (cx, cy), (cx + chip_w, cy + chip_h), color, -1)
+        cv2.putText(frame, label, (cx + pad, cy + th + pad), font, fscale, (20, 20, 20), fthick, cv2.LINE_AA)
 
     @staticmethod
     def _draw_recognized_panel(
@@ -111,18 +170,25 @@ class ClassroomMonitorApp:
             return
         h_frame, w_frame = frame.shape[:2]
         row_h = 24
+        header_h = 26
         panel_w = 280
-        panel_h = len(seen_people) * row_h + 12
+        panel_h = len(seen_people) * row_h + header_h + 12
         px = w_frame - panel_w - 10
         py = h_frame - panel_h - 10  # bottom-right corner
         # semi-transparent dark background
         overlay = frame.copy()
         cv2.rectangle(overlay, (px - 4, py - 4), (px + panel_w, py + panel_h), (20, 20, 20), -1)
         cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        active_count = sum(1 for pid in seen_people if pid in active_ids)
+        cv2.putText(frame, f"Recognized  {active_count}/{len(seen_people)} active",
+                    (px + 8, py + 17), font, 0.5, (235, 235, 235), 1, cv2.LINE_AA)
+        cv2.line(frame, (px, py + header_h - 2), (px + panel_w - 6, py + header_h - 2),
+                 (90, 90, 90), 1, cv2.LINE_AA)
         for i, (pid, (_bbox, label, p_color, _ts)) in enumerate(seen_people.items()):
-            y_pos = py + 8 + i * row_h
+            y_pos = py + header_h + 6 + i * row_h
             is_active = pid in active_ids
-            dot_color = p_color if is_active else (80, 140, 200)
+            dot_color = p_color if is_active else (140, 140, 140)
             # dot indicator: filled = active, hollow = last seen
             if is_active:
                 cv2.circle(frame, (px + 8, y_pos + 7), 5, dot_color, -1)
@@ -130,8 +196,9 @@ class ClassroomMonitorApp:
                 cv2.circle(frame, (px + 8, y_pos + 7), 5, dot_color, 1)
             # show only the name part (strip score/state clutter)
             name = label.split("|")[0].split("(")[0].strip()
+            text_color = (245, 245, 245) if is_active else (150, 150, 150)
             cv2.putText(frame, name, (px + 20, y_pos + 12),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, dot_color, 1, cv2.LINE_AA)
+                        font, 0.48, text_color, 1, cv2.LINE_AA)
 
     def _load_roster(self) -> None:
         if self.cfg.runtime.app_mode != "classroom":
@@ -163,26 +230,27 @@ class ClassroomMonitorApp:
         start_ts = time.time()
         last_process_ts = 0.0
         _fps_report_ts = start_ts  # for periodic FPS logging
-        last_recognize_ts: float = -999.0  # controls 30-second recognition interval
-        RECOGNIZE_INTERVAL = 30.0  # seconds between recognition runs per track
+        last_recognize_ts: float = -999.0  # controls the recognition interval
+        # Tuning knobs (promoted to config; values below are the runtime copies).
+        RECOGNIZE_INTERVAL = self.cfg.runtime.recognize_interval_seconds
         last_tiled_det_ts: float = -999.0   # controls tiled detection interval
-        TILED_DET_INTERVAL = 2.0            # seconds between expensive tiled passes
-        _cached_boxes: List[Tuple[int, int, int, int]] = []  # last tiled result
+        TILED_DET_INTERVAL = self.cfg.runtime.tiled_det_interval_seconds
+        _cached_boxes: List[ScoredDet] = []  # last tiled result
         # Persistent overlay: person_id -> (bbox, label, color, last_seen_ts)
         # Once a student is recognized we keep drawing their box every frame,
         # dimmed when not actively detected in the current frame.
         _seen_people: dict = {}
         # Option B: per-track vote buffer — identity locked only after VOTE_NEEDED agreements
         _vote_buffer: Dict[int, Dict[str, int]] = {}
-        VOTE_NEEDED = 10
+        VOTE_NEEDED = self.cfg.detection.votes_needed
         # Option C: distance must be this good (cosine similarity) to count toward attendance
-        ATTEND_MIN_SCORE = 0.65
+        ATTEND_MIN_SCORE = self.cfg.detection.attend_min_score
         # Stale box TTL: stop drawing a last-known-position box after this many seconds
-        STALE_BOX_TTL = 5.0
+        STALE_BOX_TTL = self.cfg.runtime.stale_box_ttl_seconds
         # Per-track recognition cooldown for unconfirmed tracks (avoids running ResNet
         # every frame on faces that haven't been matched yet)
         _track_recog_ts: Dict[int, float] = {}
-        UNCONFIRMED_RECOG_INTERVAL = 0.5  # seconds between attempts for unconfirmed tracks
+        UNCONFIRMED_RECOG_INTERVAL = self.cfg.runtime.unconfirmed_recog_interval_seconds
 
         writer = None
         if self.cfg.runtime.save_annotated_video:
@@ -242,7 +310,7 @@ class ClassroomMonitorApp:
 
             if now_ts - last_tiled_det_ts >= TILED_DET_INTERVAL:
                 last_tiled_det_ts = now_ts
-                tiled: List[Tuple[int, int, int, int]] = []
+                tiled: List[ScoredDet] = []
                 tile_w = int(w_frame * 0.60)
                 tile_h = int(h_frame * 0.60)
                 stride_x = w_frame - tile_w
@@ -260,8 +328,8 @@ class ClassroomMonitorApp:
                         tile_boxes = self._yunet_detect_scaled(
                             face_detector, tile_bgr, _DET_W_TILED, tw, th
                         )
-                        for bx, by, bw, bh in tile_boxes:
-                            tiled.append((ox + bx, oy + by, bw, bh))
+                        for (bx, by, bw, bh), sc in tile_boxes:
+                            tiled.append(((ox + bx, oy + by, bw, bh), sc))
                 _cached_boxes = self._nms_boxes(tiled)
 
             boxes = self._nms_boxes(single_boxes + _cached_boxes)
@@ -324,7 +392,7 @@ class ClassroomMonitorApp:
                             # Option C: mark attendance only for strong matches
                             if (self.cfg.runtime.app_mode == "classroom"
                                     and score >= ATTEND_MIN_SCORE):
-                                self.attendance.mark_seen(person, datetime.now())
+                                self.attendance.mark_seen(person, datetime.now(), frame_id=frame_count)
                         else:
                             # Still gathering votes — show as Unknown until confirmed
                             person = PersonRecord(
@@ -353,7 +421,7 @@ class ClassroomMonitorApp:
                         score = 0.0
                         # Identity was already vote-confirmed — safe to mark attendance
                         if self.cfg.runtime.app_mode == "classroom":
-                            self.attendance.mark_seen(person, datetime.now())
+                            self.attendance.mark_seen(person, datetime.now(), frame_id=frame_count)
                     else:
                         person = PersonRecord(
                             person_id=f"unknown_{track.track_id}",
@@ -396,7 +464,7 @@ class ClassroomMonitorApp:
             # students who are temporarily not detected (e.g. looked away).
             for pid, (p_bbox, p_label, p_color, _ts) in _seen_people.items():
                 if pid not in active_ids:
-                    self._draw_box(frame, p_bbox, p_label, (80, 140, 200))
+                    self._draw_box(frame, p_bbox, p_label, p_color, dimmed=True)
 
             frame_count += 1
 

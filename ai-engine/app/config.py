@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -17,7 +20,28 @@ class SourceConfig:
 class DetectionConfig:
     min_detection_confidence: float = 0.5
     max_faces: int = 20
-    recognition_tolerance: float = 0.20  # cosine similarity threshold = 1 - tolerance = 0.80
+    # Direct cosine-similarity gate for a face to count as a match (higher = stricter).
+    # NOTE: replaces the old inverted `recognition_tolerance` (threshold = 1 - tolerance);
+    # an old config carrying `recognition_tolerance` is auto-converted on load.
+    recognition_threshold: float = 0.35
+    # A match must beat the runner-up by at least this cosine margin to be accepted.
+    recognition_margin: float = 0.15
+    # Minimum match score required before a confirmed identity counts toward attendance.
+    attend_min_score: float = 0.65
+    # Number of agreeing recognition votes before a track's identity is locked.
+    votes_needed: int = 10
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.recognition_threshold <= 1.0:
+            raise ValueError(f"recognition_threshold must be in [0,1], got {self.recognition_threshold}")
+        if not 0.0 <= self.recognition_margin <= 1.0:
+            raise ValueError(f"recognition_margin must be in [0,1], got {self.recognition_margin}")
+        if not 0.0 <= self.attend_min_score <= 1.0:
+            raise ValueError(f"attend_min_score must be in [0,1], got {self.attend_min_score}")
+        if self.votes_needed < 1:
+            raise ValueError(f"votes_needed must be >= 1, got {self.votes_needed}")
+        if self.max_faces < 1:
+            raise ValueError(f"max_faces must be >= 1, got {self.max_faces}")
 
 
 @dataclass
@@ -44,6 +68,17 @@ class RuntimeConfig:
     save_annotated_video: bool = False
     stop_after_seconds: float = 0.0
     app_mode: str = "classroom"  # classroom | general
+    # Recognition/detection pacing (seconds). Promoted from hardcoded loop constants.
+    recognize_interval_seconds: float = 30.0      # full recognition pass cadence per track
+    tiled_det_interval_seconds: float = 2.0       # expensive tiled detection cadence
+    unconfirmed_recog_interval_seconds: float = 0.5  # retry cadence for unlocked tracks
+    stale_box_ttl_seconds: float = 5.0            # how long a last-seen box lingers
+
+    def __post_init__(self) -> None:
+        if self.max_fps < 0:
+            raise ValueError(f"max_fps must be >= 0, got {self.max_fps}")
+        if self.app_mode not in {"classroom", "general"}:
+            raise ValueError(f"app_mode must be 'classroom' or 'general', got {self.app_mode!r}")
 
 
 @dataclass
@@ -97,10 +132,34 @@ def _merge_dict(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]
     return result
 
 
+def _normalize_detection(detection: Dict[str, Any]) -> Dict[str, Any]:
+    """Back-compat: convert a legacy `recognition_tolerance` into `recognition_threshold`."""
+    detection = dict(detection)
+    if "recognition_tolerance" in detection and "recognition_threshold" not in detection:
+        tol = float(detection.pop("recognition_tolerance"))
+        detection["recognition_threshold"] = max(0.0, min(1.0, 1.0 - tol))
+        logger.warning(
+            "config: 'recognition_tolerance'=%.2f is deprecated; converted to "
+            "'recognition_threshold'=%.2f. Please update config.json.",
+            tol, detection["recognition_threshold"],
+        )
+    return detection
+
+
+def _warn_unknown_keys(config_dict: Dict[str, Any]) -> None:
+    known_sections = {
+        "source", "detection", "behavior", "attendance",
+        "runtime", "paths", "session", "admin_email",
+    }
+    for key in config_dict:
+        if key not in known_sections:
+            logger.warning("config: ignoring unknown top-level section %r", key)
+
+
 def _to_dataclass(config_dict: Dict[str, Any]) -> AppConfig:
     return AppConfig(
         source=SourceConfig(**config_dict.get("source", {})),
-        detection=DetectionConfig(**config_dict.get("detection", {})),
+        detection=DetectionConfig(**_normalize_detection(config_dict.get("detection", {}))),
         behavior=BehaviorConfig(**config_dict.get("behavior", {})),
         attendance=AttendanceConfig(**config_dict.get("attendance", {})),
         runtime=RuntimeConfig(**config_dict.get("runtime", {})),
@@ -131,6 +190,12 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
 
     with path.open("r", encoding="utf-8") as fh:
         user_config = json.load(fh)
+
+    _warn_unknown_keys(user_config)
+    # Normalize the user's detection block before merging so a legacy
+    # `recognition_tolerance` key never collides with the default `recognition_threshold`.
+    if "detection" in user_config:
+        user_config["detection"] = _normalize_detection(user_config["detection"])
 
     merged = _merge_dict(default_dict, user_config)
     return _to_dataclass(merged)

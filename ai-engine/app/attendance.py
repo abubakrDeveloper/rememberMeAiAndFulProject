@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
+from .scoring import confidence_band
 from .types import AttendanceEntry, PersonRecord
 
 
@@ -14,19 +15,14 @@ class AttendanceManager:
         self._teacher_seen_counter = defaultdict(int)
         self._student_attendance: Dict[str, AttendanceEntry] = {}
         self._teacher_attendance: Dict[str, AttendanceEntry] = {}
+        # Last frame index in which each person_id was counted — prevents a person
+        # appearing in two tracks within the same frame from being counted twice.
+        self._last_counted_frame: Dict[str, int] = {}
 
     def _confidence_from_counter(self, count: int) -> float:
         # Confidence rises as repeated sightings exceed the minimum confirmation threshold.
         score = float(count) / float(self.min_confirm_frames * 2)
         return max(0.0, min(1.0, score))
-
-    @staticmethod
-    def _confidence_band(score: float) -> str:
-        if score >= 0.75:
-            return "high"
-        if score >= 0.4:
-            return "medium"
-        return "low"
 
     def _mark(
         self,
@@ -34,10 +30,23 @@ class AttendanceManager:
         seen_at: datetime,
         counter: defaultdict,
         bucket: Dict[str, AttendanceEntry],
+        frame_id: Optional[int],
     ) -> None:
+        # Per-frame dedup: if already counted this frame, only refresh last_seen.
+        already_counted = (
+            frame_id is not None
+            and self._last_counted_frame.get(person.person_id) == frame_id
+        )
+        if already_counted:
+            if person.person_id in bucket:
+                bucket[person.person_id].last_seen = seen_at
+            return
+        if frame_id is not None:
+            self._last_counted_frame[person.person_id] = frame_id
+
         counter[person.person_id] += 1
         confidence = self._confidence_from_counter(counter[person.person_id])
-        confidence_band = self._confidence_band(confidence)
+        band = confidence_band(confidence)
         if person.person_id not in bucket and counter[person.person_id] >= self.min_confirm_frames:
             bucket[person.person_id] = AttendanceEntry(
                 person_id=person.person_id,
@@ -47,18 +56,18 @@ class AttendanceManager:
                 first_seen=seen_at,
                 last_seen=seen_at,
                 confidence=confidence,
-                confidence_band=confidence_band,
+                confidence_band=band,
             )
         elif person.person_id in bucket:
             bucket[person.person_id].last_seen = seen_at
             bucket[person.person_id].confidence = confidence
-            bucket[person.person_id].confidence_band = confidence_band
+            bucket[person.person_id].confidence_band = band
 
-    def mark_seen(self, person: PersonRecord, seen_at: datetime) -> None:
+    def mark_seen(self, person: PersonRecord, seen_at: datetime, frame_id: Optional[int] = None) -> None:
         if person.role == "student":
-            self._mark(person, seen_at, self._student_seen_counter, self._student_attendance)
+            self._mark(person, seen_at, self._student_seen_counter, self._student_attendance, frame_id)
         elif person.role == "teacher":
-            self._mark(person, seen_at, self._teacher_seen_counter, self._teacher_attendance)
+            self._mark(person, seen_at, self._teacher_seen_counter, self._teacher_attendance, frame_id)
 
     def get_present_students(self) -> List[AttendanceEntry]:
         return sorted(self._student_attendance.values(), key=lambda x: x.person_id)
