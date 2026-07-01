@@ -29,7 +29,9 @@
     "max_fps": 10.0,
     "display": true,
     "save_annotated_video": false,
-    "stop_after_seconds": 0.0
+    "stop_after_seconds": 0.0,
+    "stale_box_ttl_seconds": 5.0,
+    "track_max_age_seconds": 5.0
   },
   "paths": {
     "roster_students_dir": "roster/students",

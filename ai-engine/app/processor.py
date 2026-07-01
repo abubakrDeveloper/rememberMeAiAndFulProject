@@ -35,6 +35,7 @@ class ClassroomMonitorApp:
         self.attendance = AttendanceManager(min_confirm_frames=self.cfg.attendance.min_confirm_frames)
         self.tracker = ByteTrackTracker(
             high_score=max(0.6, self.cfg.detection.min_detection_confidence + 0.1),
+            max_age_seconds=self.cfg.runtime.track_max_age_seconds,
         )
         self.video = VideoInput(self.cfg.source)
         self.reporter = Reporter(
@@ -243,6 +244,9 @@ class ClassroomMonitorApp:
         # Option B: per-track vote buffer — identity locked only after VOTE_NEEDED agreements
         _vote_buffer: Dict[int, Dict[str, int]] = {}
         VOTE_NEEDED = self.cfg.detection.votes_needed
+        # A returning known face matched via the re-ID gallery locks faster than a
+        # cold enrollment match (it was already confirmed moments ago).
+        REID_VOTES_NEEDED = max(1, min(3, VOTE_NEEDED))
         # Option C: distance must be this good (cosine similarity) to count toward attendance
         ATTEND_MIN_SCORE = self.cfg.detection.attend_min_score
         # Stale box TTL: stop drawing a last-known-position box after this many seconds
@@ -342,6 +346,8 @@ class ClassroomMonitorApp:
                 if w < 30 or h < 30:
                     continue
 
+                _role = "student" if self.cfg.runtime.app_mode == "classroom" else "person"
+
                 # --- Recognition: only when interval elapsed OR track not yet locked ---
                 unconfirmed_due = (
                     not track.person_id
@@ -364,47 +370,63 @@ class ClassroomMonitorApp:
 
                     # Skip MTCNN re-detection; YuNet already found this face.
                     _emb = self.face_db.encode_crop(face_rgb)
+                    match_person, score, via_reid = None, 0.0, False
                     if _emb is not None:
-                        person, score = self.face_db.match_embedding(_emb)
-                        if person is None:
+                        match_person, score = self.face_db.match_embedding(_emb)
+                        if match_person is None:
                             # Enrollment match failed — try re-ID against confirmed recent frames
-                            person, score = self.face_db.reid_match(_emb)
-                    else:
-                        person, score = None, 0.0
-                    if person:
-                        # Option B: accumulate votes; lock identity only after VOTE_NEEDED agreements
-                        if not track.person_id:
-                            votes = _vote_buffer.setdefault(track.track_id, {})
-                            votes[person.person_id] = votes.get(person.person_id, 0) + 1
-                            top_pid = max(votes, key=votes.get)
-                            if votes[top_pid] >= VOTE_NEEDED:
-                                locked = self.face_db._records.get(top_pid)
-                                if locked:
-                                    track.person_id = locked.person_id
-                                    track.person_name = locked.name
+                            match_person, score = self.face_db.reid_match(_emb)
+                            via_reid = match_person is not None
 
-                        # Identity confirmed (locked now or was locked before)
+                    locked_id = (
+                        track.person_id
+                        if track.person_id and not track.person_id.startswith("unknown_")
+                        else ""
+                    )
+
+                    if locked_id:
+                        # STICKY IDENTITY: once recognized, the name stays attached to this
+                        # track for its lifetime. A failed match this frame (head turned,
+                        # blurry) must NOT relabel it to Unknown.
+                        person = self.face_db._records.get(
+                            locked_id,
+                            PersonRecord(person_id=locked_id, name=track.person_name, role=_role),
+                        )
+                        agrees = match_person is not None and match_person.person_id == locked_id
+                        score = score if agrees else 0.0
+                        # Refresh the re-ID gallery only when this frame agrees with the lock.
+                        if _emb is not None and agrees:
+                            self.face_db.update_gallery(locked_id, _emb)
+                        if self.cfg.runtime.app_mode == "classroom":
+                            self.attendance.mark_seen(person, datetime.now(), frame_id=frame_count)
+                    elif match_person is not None:
+                        # Not locked yet — accumulate votes. A strong re-ID hit (a face that
+                        # was confirmed moments ago) locks faster than a cold enrollment match.
+                        votes = _vote_buffer.setdefault(track.track_id, {})
+                        votes[match_person.person_id] = votes.get(match_person.person_id, 0) + 1
+                        need = REID_VOTES_NEEDED if via_reid else VOTE_NEEDED
+                        top_pid = max(votes, key=votes.get)
+                        if votes[top_pid] >= need:
+                            locked = self.face_db._records.get(top_pid)
+                            if locked:
+                                track.person_id = locked.person_id
+                                track.person_name = locked.name
+
                         if track.person_id and not track.person_id.startswith("unknown_"):
-                            person = self.face_db._records.get(track.person_id, person)
-                            # Feed confirmed-frame embedding into re-ID gallery
+                            person = self.face_db._records.get(track.person_id, match_person)
                             if _emb is not None:
                                 self.face_db.update_gallery(track.person_id, _emb)
-                            # Option C: mark attendance only for strong matches
                             if (self.cfg.runtime.app_mode == "classroom"
                                     and score >= ATTEND_MIN_SCORE):
                                 self.attendance.mark_seen(person, datetime.now(), frame_id=frame_count)
                         else:
                             # Still gathering votes — show as Unknown until confirmed
                             person = PersonRecord(
-                                person_id=f"unknown_{track.track_id}",
-                                name="Unknown",
-                                role="student" if self.cfg.runtime.app_mode == "classroom" else "person",
+                                person_id=f"unknown_{track.track_id}", name="Unknown", role=_role,
                             )
                     else:
                         person = PersonRecord(
-                            person_id=f"unknown_{track.track_id}",
-                            name="Unknown",
-                            role="student" if self.cfg.runtime.app_mode == "classroom" else "person",
+                            person_id=f"unknown_{track.track_id}", name="Unknown", role=_role,
                         )
                 else:
                     # Reuse cached (vote-confirmed) identity from the track
@@ -415,7 +437,7 @@ class ClassroomMonitorApp:
                             PersonRecord(
                                 person_id=track.person_id,
                                 name=track.person_name,
-                                role="student",
+                                role=_role,
                             ),
                         )
                         score = 0.0
@@ -424,13 +446,18 @@ class ClassroomMonitorApp:
                             self.attendance.mark_seen(person, datetime.now(), frame_id=frame_count)
                     else:
                         person = PersonRecord(
-                            person_id=f"unknown_{track.track_id}",
-                            name="Unknown",
-                            role="student" if self.cfg.runtime.app_mode == "classroom" else "person",
+                            person_id=f"unknown_{track.track_id}", name="Unknown", role=_role,
                         )
                         score = 0.0
 
-                label = f"{person.name} ({score:.2f})" if person.name != "Unknown" else "Unknown"
+                # Label: name+score for a fresh match; just the name when maintaining a
+                # locked identity (score 0) so it doesn't read as a bad "(0.00)" match.
+                if person.name == "Unknown":
+                    label = "Unknown"
+                elif score > 0:
+                    label = f"{person.name} ({score:.2f})"
+                else:
+                    label = person.name
                 color = (0, 200, 0) if person.name != "Unknown" else (0, 165, 255)
 
                 self._draw_box(frame, track.bbox, label, color)

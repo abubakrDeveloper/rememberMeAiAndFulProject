@@ -73,12 +73,18 @@ class RuntimeConfig:
     tiled_det_interval_seconds: float = 2.0       # expensive tiled detection cadence
     unconfirmed_recog_interval_seconds: float = 0.5  # retry cadence for unlocked tracks
     stale_box_ttl_seconds: float = 5.0            # how long a last-seen box lingers
+    # How long a track (and its locked identity) survives with no fresh detection —
+    # e.g. while a recognized person turns their head away. Keep aligned with
+    # stale_box_ttl_seconds so the dimmed name lingers exactly as long as the track.
+    track_max_age_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         if self.max_fps < 0:
             raise ValueError(f"max_fps must be >= 0, got {self.max_fps}")
         if self.app_mode not in {"classroom", "general"}:
             raise ValueError(f"app_mode must be 'classroom' or 'general', got {self.app_mode!r}")
+        if self.track_max_age_seconds <= 0:
+            raise ValueError(f"track_max_age_seconds must be > 0, got {self.track_max_age_seconds}")
 
 
 @dataclass
