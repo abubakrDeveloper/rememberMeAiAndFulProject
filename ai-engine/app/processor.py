@@ -49,6 +49,17 @@ class ClassroomMonitorApp:
         self._known_teachers: List[PersonRecord] = []
 
     @staticmethod
+    def _bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        ix = max(ax, bx); iy = max(ay, by)
+        ix2 = min(ax + aw, bx + bw); iy2 = min(ay + ah, by + bh)
+        iw = max(0, ix2 - ix); ih = max(0, iy2 - iy)
+        inter = iw * ih
+        union = aw * ah + bw * bh - inter
+        return inter / union if union > 0 else 0.0
+
+    @staticmethod
     def _nms_boxes(
         boxes: List[ScoredDet], iou_threshold: float = 0.35
     ) -> List[ScoredDet]:
@@ -489,9 +500,15 @@ class ClassroomMonitorApp:
 
             # Draw a dimmed box at the last-known position for recently-seen
             # students who are temporarily not detected (e.g. looked away).
+            active_boxes = [t.bbox for t in tracks]
             for pid, (p_bbox, p_label, p_color, _ts) in _seen_people.items():
-                if pid not in active_ids:
-                    self._draw_box(frame, p_bbox, p_label, p_color, dimmed=True)
+                if pid in active_ids:
+                    continue
+                # Safety net: never draw a dimmed "kept" box over a live box, so a
+                # brief detection glitch can't show a double box (kept + new Unknown).
+                if any(self._bbox_iou(p_bbox, ab) > 0.3 for ab in active_boxes):
+                    continue
+                self._draw_box(frame, p_bbox, p_label, p_color, dimmed=True)
 
             frame_count += 1
 

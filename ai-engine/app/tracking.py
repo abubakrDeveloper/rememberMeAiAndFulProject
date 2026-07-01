@@ -82,6 +82,13 @@ class _KalmanBoxTracker:
         # Guard against negative area blowing up the model.
         if self.x[2, 0] + self.x[6, 0] <= 0:
             self.x[6, 0] = 0.0
+        # While coasting (already missed >=1 frame), damp velocity so the box parks
+        # near its last-seen position instead of drifting off. Drift both looks laggy
+        # and, when the face reappears, lowers IoU enough to spawn a duplicate
+        # "Unknown" track next to the kept one. Faces are near-stationary, so parking
+        # is the right prior.
+        if self.time_since_update >= 1:
+            self.x[4:, 0] *= 0.5
         self.x = self.F @ self.x
         self.P = self.F @ self.P @ self.F.T + self.Q
         self.time_since_update += 1
@@ -117,12 +124,16 @@ class ByteTrackTracker:
         max_age_seconds: float = 2.0,
         high_score: float = 0.6,
         low_score: float = 0.1,
+        rescue_iou_threshold: float = 0.15,
     ) -> None:
         self.iou_threshold = iou_threshold
         self.low_iou_threshold = low_iou_threshold
         self.max_age_seconds = max_age_seconds
         self.high_score = high_score
         self.low_score = low_score
+        # Looser IoU for the rescue pass: a reappearing face reclaims its coasting
+        # track rather than spawning a duplicate track.
+        self.rescue_iou_threshold = rescue_iou_threshold
         self._trackers: List[_KalmanBoxTracker] = []
         self._next_id = 1
 
@@ -181,9 +192,21 @@ class ByteTrackTracker:
         for d, t in matches2:
             remaining[t].update(low_boxes[d], now_ts)
 
-        # --- New tracks from unmatched high-score detections ---
-        for d in un_dets_high:
-            trk = _KalmanBoxTracker(high_boxes[d], self._next_id, now_ts)
+        # --- Stage 3 (rescue): leftover high-score detections get a looser second
+        # chance against tracks still unmatched. Lets a face that was briefly
+        # undetected (a head-turn) reclaim its existing coasting track instead of
+        # spawning a duplicate "Unknown" track right next to the kept one.
+        rescue_pool = [remaining[t] for t in un_trks2]
+        leftover_high = [high_boxes[d] for d in un_dets_high]
+        matches3, un_dets_high2, _ = self._associate(
+            leftover_high, rescue_pool, self.rescue_iou_threshold
+        )
+        for d, t in matches3:
+            rescue_pool[t].update(leftover_high[d], now_ts)
+
+        # --- New tracks only from high-score detections still unmatched after rescue ---
+        for d in un_dets_high2:
+            trk = _KalmanBoxTracker(leftover_high[d], self._next_id, now_ts)
             self._next_id += 1
             self._trackers.append(trk)
 
